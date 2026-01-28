@@ -1,7 +1,7 @@
 /**
  * @file cache.c
  * @brief Cache management for HiFi4 DSP on Allwinner R528/T113
- * 
+ *
  * This HiFi4 configuration:
  *   - 32 KB I-cache, 64-byte lines, 2 ways
  *   - 32 KB D-cache, 64-byte lines, 4 ways
@@ -9,10 +9,10 @@
  *   - NO CACHEATTR register (XCHAL_HAVE_CACHEATTR = 0)
  *   - Uses TLB for region protection with translation (XCHAL_HAVE_XLT_CACHEATTR = 1)
  *   - Has spanning way TLB (XCHAL_HAVE_SPANNING_WAY = 1)
- * 
+ *
  * Cache attributes are controlled by TLB entries, not a CACHEATTR register.
  * The initial TLB configuration determines which regions are cached.
- * 
+ *
  * To change caching behavior, you need to modify the TLB entries using
  * WITLB/WDTLB instructions (write I/D TLB).
  */
@@ -33,9 +33,19 @@
 #define DCACHE_WAYS         4       /* 4 */
 #define ICACHE_WAYS         2       /* 2 */
 
+/* Calculate set width (number of bits needed for set index) */
+/* D-cache: 32KB / (64 bytes/line * 4 ways) = 128 sets = 7 bits */
+/* I-cache: 32KB / (64 bytes/line * 2 ways) = 256 sets = 8 bits */
+#define XCHAL_DCACHE_SETWIDTH       7   /* log2(number of sets) = log2(128) */
+#define XCHAL_ICACHE_SETWIDTH       8   /* log2(number of sets) = log2(256) */
+
+/* Way width for cache index operations (set width + line width) */
+#define DCACHE_WAY_SHIFT    (XCHAL_DCACHE_SETWIDTH + XCHAL_DCACHE_LINEWIDTH)  /* 7 + 6 = 13 */
+#define ICACHE_WAY_SHIFT    (XCHAL_ICACHE_SETWIDTH + XCHAL_ICACHE_LINEWIDTH)  /* 8 + 6 = 14 */
+
 /*============================================================================
  * TLB Cache Attribute Values (for XLT_CACHEATTR configs)
- * 
+ *
  * These are the attribute values used in TLB entries.
  * The exact encoding depends on the Xtensa configuration.
  * Common values for region protection:
@@ -60,7 +70,7 @@ void dcache_region_invalidate(void *addr, uint32_t size)
 {
     uint32_t start = (uint32_t)addr & ~(DCACHE_LINE_SIZE - 1);
     uint32_t end = (uint32_t)addr + size;
-    
+
     for (uint32_t a = start; a < end; a += DCACHE_LINE_SIZE) {
         __asm__ volatile("dhi %0, 0" :: "a"(a));
     }
@@ -71,7 +81,7 @@ void dcache_region_writeback(void *addr, uint32_t size)
 {
     uint32_t start = (uint32_t)addr & ~(DCACHE_LINE_SIZE - 1);
     uint32_t end = (uint32_t)addr + size;
-    
+
     for (uint32_t a = start; a < end; a += DCACHE_LINE_SIZE) {
         __asm__ volatile("dhwb %0, 0" :: "a"(a));
     }
@@ -82,7 +92,7 @@ void dcache_region_writeback_invalidate(void *addr, uint32_t size)
 {
     uint32_t start = (uint32_t)addr & ~(DCACHE_LINE_SIZE - 1);
     uint32_t end = (uint32_t)addr + size;
-    
+
     for (uint32_t a = start; a < end; a += DCACHE_LINE_SIZE) {
         __asm__ volatile("dhwbi %0, 0" :: "a"(a));
     }
@@ -97,7 +107,7 @@ void icache_region_invalidate(void *addr, uint32_t size)
 {
     uint32_t start = (uint32_t)addr & ~(ICACHE_LINE_SIZE - 1);
     uint32_t end = (uint32_t)addr + size;
-    
+
     for (uint32_t a = start; a < end; a += ICACHE_LINE_SIZE) {
         __asm__ volatile("ihi %0, 0" :: "a"(a));
     }
@@ -110,17 +120,22 @@ void icache_region_invalidate(void *addr, uint32_t size)
 
 void dcache_invalidate_all(void)
 {
-    /* 
+    /*
      * Index-based invalidate iterates through all cache indices.
      * For a 32KB, 4-way, 64-byte line cache:
      *   Sets = 32768 / (64 * 4) = 128 sets
+     *
+     * Cache index format for DII instruction:
+     *   bits [5:0]    = line offset (6 bits, LINEWIDTH)
+     *   bits [12:6]   = set index (7 bits, SETWIDTH)
+     *   bits [14:13]  = way (2 bits for 4-way)
+     * Total index = (way << DCACHE_WAY_SHIFT) | (set << DCACHE_LINEWIDTH)
      */
     uint32_t sets = DCACHE_SIZE / (DCACHE_LINE_SIZE * DCACHE_WAYS);
-    
+
     for (uint32_t way = 0; way < DCACHE_WAYS; way++) {
         for (uint32_t set = 0; set < sets; set++) {
-            /* Index format: set in upper bits, way in lower bits */
-            uint32_t index = (set << XCHAL_DCACHE_LINEWIDTH) | (way << 1);
+            uint32_t index = (way << DCACHE_WAY_SHIFT) | (set << XCHAL_DCACHE_LINEWIDTH);
             __asm__ volatile("dii %0, 0" :: "a"(index));
         }
     }
@@ -130,10 +145,10 @@ void dcache_invalidate_all(void)
 void dcache_writeback_all(void)
 {
     uint32_t sets = DCACHE_SIZE / (DCACHE_LINE_SIZE * DCACHE_WAYS);
-    
+
     for (uint32_t way = 0; way < DCACHE_WAYS; way++) {
         for (uint32_t set = 0; set < sets; set++) {
-            uint32_t index = (set << XCHAL_DCACHE_LINEWIDTH) | (way << 1);
+            uint32_t index = (way << DCACHE_WAY_SHIFT) | (set << XCHAL_DCACHE_LINEWIDTH);
             __asm__ volatile("diwb %0, 0" :: "a"(index));
         }
     }
@@ -143,10 +158,10 @@ void dcache_writeback_all(void)
 void dcache_writeback_invalidate_all(void)
 {
     uint32_t sets = DCACHE_SIZE / (DCACHE_LINE_SIZE * DCACHE_WAYS);
-    
+
     for (uint32_t way = 0; way < DCACHE_WAYS; way++) {
         for (uint32_t set = 0; set < sets; set++) {
-            uint32_t index = (set << XCHAL_DCACHE_LINEWIDTH) | (way << 1);
+            uint32_t index = (way << DCACHE_WAY_SHIFT) | (set << XCHAL_DCACHE_LINEWIDTH);
             __asm__ volatile("diwbi %0, 0" :: "a"(index));
         }
     }
@@ -155,11 +170,21 @@ void dcache_writeback_invalidate_all(void)
 
 void icache_invalidate_all(void)
 {
+    /*
+     * Index-based invalidate for instruction cache.
+     * For a 32KB, 2-way, 64-byte line cache:
+     *   Sets = 32768 / (64 * 2) = 256 sets (8 bits)
+     *
+     * Cache index format for III instruction:
+     *   bits [5:0]    = line offset (6 bits, LINEWIDTH)
+     *   bits [13:6]   = set index (8 bits, SETWIDTH)
+     *   bits [14]     = way (1 bit for 2-way)
+     */
     uint32_t sets = ICACHE_SIZE / (ICACHE_LINE_SIZE * ICACHE_WAYS);
-    
+
     for (uint32_t way = 0; way < ICACHE_WAYS; way++) {
         for (uint32_t set = 0; set < sets; set++) {
-            uint32_t index = (set << XCHAL_ICACHE_LINEWIDTH) | (way << 1);
+            uint32_t index = (way << ICACHE_WAY_SHIFT) | (set << XCHAL_ICACHE_LINEWIDTH);
             __asm__ volatile("iii %0, 0" :: "a"(index));
         }
     }
@@ -174,10 +199,10 @@ void cache_sync(void)
 
 /*============================================================================
  * TLB-based Cache Attribute Control
- * 
+ *
  * This configuration uses a "spanning way" TLB that covers the entire
  * 4GB address space with 512MB regions. Each region has a cache attribute.
- * 
+ *
  * The DTLB and ITLB are separate, so we need to configure both.
  *============================================================================*/
 
@@ -207,10 +232,10 @@ static uint32_t read_itlb(uint32_t vaddr)
  * @brief Write DTLB entry
  * @param vaddr Virtual address (determines which TLB entry)
  * @param pte Page table entry value (PPN + attributes)
- * 
+ *
  * For spanning way, vaddr selects the 512MB region.
  * The entry value format depends on the config, typically:
- *   [31:12] = Physical page number (PPN) 
+ *   [31:12] = Physical page number (PPN)
  *   [3:0] = Cache attribute
  */
 static void write_dtlb(uint32_t vaddr, uint32_t pte)
@@ -238,7 +263,7 @@ static void write_itlb(uint32_t vaddr, uint32_t pte)
  * @brief Set cache attribute for a memory region
  * @param vaddr Start of 512MB region (0x00000000, 0x20000000, etc.)
  * @param attr Cache attribute (CA_BYPASS, CA_WRITEBACK, etc.)
- * 
+ *
  * For identity mapping (vaddr == paddr), we just need to set the attribute.
  */
 void cache_set_region_attr(uint32_t vaddr, uint32_t attr)
@@ -246,11 +271,11 @@ void cache_set_region_attr(uint32_t vaddr, uint32_t attr)
     /* Read current entry to get PPN */
     uint32_t dtlb = read_dtlb(vaddr);
     uint32_t itlb = read_itlb(vaddr);
-    
+
     /* Clear old attribute, set new one */
     dtlb = (dtlb & ~0xF) | (attr & 0xF);
     itlb = (itlb & ~0xF) | (attr & 0xF);
-    
+
     /* Write back */
     write_dtlb(vaddr, dtlb);
     write_itlb(vaddr, itlb);
@@ -262,7 +287,7 @@ void cache_set_region_attr(uint32_t vaddr, uint32_t attr)
 
 /**
  * @brief Initialize caches
- * 
+ *
  * On this TLB-based system, cache behavior depends on TLB entries.
  * The default TLB setup (from reset vector/LSP) should already have
  * reasonable settings. We just invalidate to start fresh.
@@ -272,14 +297,14 @@ void cache_init(void)
     /* Invalidate both caches */
     icache_invalidate_all();
     dcache_invalidate_all();
-    
+
     __asm__ volatile("dsync");
     __asm__ volatile("isync");
 }
 
 /**
  * @brief Enable caching for DDR region at 0x30000000
- * 
+ *
  * Sets the 0x20000000-0x3FFFFFFF region to write-back cached.
  */
 void cache_enable_ddr(void)
@@ -287,10 +312,10 @@ void cache_enable_ddr(void)
     /* Flush and invalidate first */
     dcache_writeback_invalidate_all();
     icache_invalidate_all();
-    
+
     /* Set region 1 (0x20000000-0x3FFFFFFF) to write-back */
     cache_set_region_attr(0x20000000, CA_WRITEBACK);
-    
+
     __asm__ volatile("dsync");
     __asm__ volatile("isync");
 }
@@ -302,7 +327,7 @@ void cache_enable_ddr(void)
 void cache_dump_config(void)
 {
     hal_debug_print("\n=== Cache Configuration ===\n");
-    
+
     hal_debug_print("D-Cache: ");
     hal_debug_hex(DCACHE_SIZE);
     hal_debug_print(" bytes, ");
@@ -310,7 +335,7 @@ void cache_dump_config(void)
     hal_debug_print("-byte lines, ");
     hal_debug_hex(DCACHE_WAYS);
     hal_debug_print(" ways\n");
-    
+
     hal_debug_print("I-Cache: ");
     hal_debug_hex(ICACHE_SIZE);
     hal_debug_print(" bytes, ");
@@ -318,22 +343,22 @@ void cache_dump_config(void)
     hal_debug_print("-byte lines, ");
     hal_debug_hex(ICACHE_WAYS);
     hal_debug_print(" ways\n");
-    
+
     hal_debug_print("\nTLB Cache Attributes by Region:\n");
-    
+
     /* Read and display TLB entries for each 512MB region */
     for (uint32_t region = 0; region < 8; region++) {
         uint32_t vaddr = region * 0x20000000;
         uint32_t dtlb = read_dtlb(vaddr);
         uint32_t itlb = read_itlb(vaddr);
-        
+
         hal_debug_print("  0x");
         hal_debug_hex(vaddr);
         hal_debug_print(": DTLB=");
         hal_debug_hex(dtlb);
         hal_debug_print(" ITLB=");
         hal_debug_hex(itlb);
-        
+
         /* Decode attribute */
         uint32_t d_attr = dtlb & 0xF;
         hal_debug_print(" (");
