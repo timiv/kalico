@@ -1,12 +1,12 @@
 /**
  * @file hal_core.c
  * @brief Core HAL implementation for Allwinner R528/T113 HiFi4 DSP
- * 
+ *
  * Copyright (C) 2025  James Turton <james.turton@gmx.com>
  * This file may be distributed under the terms of the GNU GPLv3 license.
- * 
+ *
  * This file provides interrupt handling infrastructure and core HAL functions.
- * 
+ *
  * Note: The HiFi4 DSP uses Xtensa-specific interrupt handling mechanisms.
  * This implementation provides a generic interrupt dispatch mechanism that
  * you'll need to connect to the Xtensa interrupt vector.
@@ -19,13 +19,13 @@
  * HiFi4 DSP Specific Definitions
  *============================================================================*/
 
-/* 
+/*
  * The HiFi4 DSP on R528/T113 has a two-level interrupt structure:
- * 
+ *
  * 1. Direct DSP core interrupts (directly connected to Xtensa interrupt inputs):
  *    - These include TIMER0, TIMER1, HSTIMER0, HSTIMER1, GPADC, etc.
  *    - These are handled directly by enabling the Xtensa INTENABLE bits
- * 
+ *
  * 2. DSP_INTC (external interrupt controller at 0x01700800):
  *    - Routes many peripheral interrupts to a single DSP core interrupt (IRQ 17)
  *    - Includes UART, TWI, SPI, GPIO, MSGBOX, etc.
@@ -75,7 +75,7 @@ static volatile bool global_irq_enabled = false;
  * Xtensa-specific Interrupt Primitives
  *============================================================================*/
 
-/* 
+/*
  * Xtensa-specific functions for Call0 ABI
  * These work with both windowed and Call0 ABI
  */
@@ -131,7 +131,7 @@ void irq_register(uint32_t irq_num, irq_handler_t handler, void *arg)
     if (irq_num >= MAX_IRQ_NUM) {
         return;
     }
-    
+
     irq_table[irq_num].handler = handler;
     irq_table[irq_num].arg = arg;
 }
@@ -141,7 +141,7 @@ void irq_unregister(uint32_t irq_num)
     if (irq_num >= MAX_IRQ_NUM) {
         return;
     }
-    
+
     irq_table[irq_num].handler = NULL;
     irq_table[irq_num].arg = NULL;
 }
@@ -154,7 +154,7 @@ void intc_register(uint32_t intc_num, irq_handler_t handler, void *arg)
     if (intc_num >= MAX_INTC_NUM) {
         return;
     }
-    
+
     intc_table[intc_num].handler = handler;
     intc_table[intc_num].arg = arg;
 }
@@ -167,14 +167,14 @@ void intc_unregister(uint32_t intc_num)
     if (intc_num >= MAX_INTC_NUM) {
         return;
     }
-    
+
     intc_table[intc_num].handler = NULL;
     intc_table[intc_num].arg = NULL;
 }
 
 /**
  * @brief Enable a direct DSP core interrupt
- * 
+ *
  * For direct interrupts like TIMER0, TIMER1, HSTIMER0, HSTIMER1, GPADC, etc.
  * These are directly connected to the Xtensa interrupt inputs.
  */
@@ -183,7 +183,7 @@ void irq_enable_interrupt(uint32_t irq_num)
     if (irq_num >= MAX_IRQ_NUM) {
         return;
     }
-    
+
     /* Enable in Xtensa INTENABLE register */
     uint32_t intenable = xtensa_get_intenable();
     intenable |= BIT(irq_num);
@@ -195,7 +195,7 @@ void irq_disable_interrupt(uint32_t irq_num)
     if (irq_num >= MAX_IRQ_NUM) {
         return;
     }
-    
+
     /* Disable in Xtensa INTENABLE register */
     uint32_t intenable = xtensa_get_intenable();
     intenable &= ~BIT(irq_num);
@@ -204,7 +204,7 @@ void irq_disable_interrupt(uint32_t irq_num)
 
 /**
  * @brief Enable a DSP_INTC peripheral interrupt
- * 
+ *
  * For peripheral interrupts like UART, TWI, SPI, GPIO, MSGBOX, etc.
  * These go through the DSP_INTC and trigger IRQ_INTC (17) on the core.
  */
@@ -213,10 +213,10 @@ void intc_enable(uint32_t intc_num)
     if (intc_num >= MAX_INTC_NUM) {
         return;
     }
-    
+
     uint32_t reg_offset;
     uint32_t bit_pos = intc_num % 32;
-    
+
     /* Determine which enable register to use */
     if (intc_num < 32) {
         reg_offset = DSP_INTC_EN0;
@@ -225,10 +225,10 @@ void intc_enable(uint32_t intc_num)
     } else {
         reg_offset = DSP_INTC_EN2;
     }
-    
+
     /* Enable the interrupt in DSP_INTC */
     REG32(DSP_INTC_BASE + reg_offset) |= BIT(bit_pos);
-    
+
     /* Make sure IRQ_INTC is enabled at the core level */
     irq_enable_interrupt(IRQ_INTC);
 }
@@ -238,10 +238,10 @@ void intc_disable(uint32_t intc_num)
     if (intc_num >= MAX_INTC_NUM) {
         return;
     }
-    
+
     uint32_t reg_offset;
     uint32_t bit_pos = intc_num % 32;
-    
+
     /* Determine which enable register to use */
     if (intc_num < 32) {
         reg_offset = DSP_INTC_EN0;
@@ -250,7 +250,7 @@ void intc_disable(uint32_t intc_num)
     } else {
         reg_offset = DSP_INTC_EN2;
     }
-    
+
     /* Disable the interrupt in DSP_INTC */
     REG32(DSP_INTC_BASE + reg_offset) &= ~BIT(bit_pos);
 }
@@ -325,7 +325,7 @@ void hal_trigger_soft_interrupt(uint32_t irq_num)
 
 /**
  * @brief Dispatch DSP_INTC peripheral interrupts
- * 
+ *
  * Called when IRQ_INTC (17) fires. Checks DSP_INTC pending registers
  * to find which peripheral(s) triggered the interrupt.
  */
@@ -335,23 +335,23 @@ static void dispatch_intc_interrupts(void)
     for (int reg = 0; reg < 4; reg++) {
         uint32_t pend_offset = DSP_INTC_PEND0 + reg * 4;
         uint32_t en_offset = DSP_INTC_EN0 + reg * 4;
-        
+
         uint32_t pending = REG32(DSP_INTC_BASE + pend_offset);
         uint32_t enabled = REG32(DSP_INTC_BASE + en_offset);
-        
+
         /* Only process enabled and pending interrupts */
         pending &= enabled;
-        
+
         while (pending) {
             /* Find lowest set bit */
             int bit = __builtin_ctz(pending);
             uint32_t intc_num = reg * 32 + bit;
-            
+
             /* Call handler if registered */
             if (intc_num < MAX_INTC_NUM && intc_table[intc_num].handler) {
                 intc_table[intc_num].handler(intc_num, intc_table[intc_num].arg);
             }
-            
+
             /* Clear this bit in our local copy */
             pending &= ~BIT(bit);
         }
@@ -360,7 +360,7 @@ static void dispatch_intc_interrupts(void)
 
 /**
  * @brief Main interrupt handler - called from Xtensa interrupt vector
- * 
+ *
  * This function is called from the interrupt handler in startup.S.
  * It reads the Xtensa INTERRUPT register to find pending interrupts
  * and dispatches to registered handlers.
@@ -373,14 +373,14 @@ void hal_irq_dispatch(void)
     /* Get pending interrupts from Xtensa core */
     uint32_t pending = xtensa_get_interrupt();
     uint32_t enabled = xtensa_get_intenable();
-    
+
     /* Only process enabled and pending interrupts */
     pending &= enabled;
-    
+
     while (pending) {
         /* Find lowest set bit */
         int irq = __builtin_ctz(pending);
-        
+
         if (irq == IRQ_INTC) {
             /* This is the INTC interrupt - dispatch peripheral interrupts */
             dispatch_intc_interrupts();
@@ -390,12 +390,12 @@ void hal_irq_dispatch(void)
                 irq_table[irq].handler(irq, irq_table[irq].arg);
             }
         }
-        
-        /* Clear this interrupt if it's edge-triggered 
+
+        /* Clear this interrupt if it's edge-triggered
          * Note: Level-triggered interrupts must be cleared at the source
          */
         xtensa_clear_interrupt(BIT(irq));
-        
+
         /* Clear this bit in our local copy */
         pending &= ~BIT(irq);
     }
@@ -405,7 +405,7 @@ void hal_irq_dispatch(void)
  * Delay Functions
  *============================================================================*/
 
-/* 
+/*
  * Simple busy-wait delays
  * Note: These are approximate and depend on CPU clock speed.
  * For accurate timing, use a hardware timer.
@@ -415,7 +415,7 @@ void delay_us(uint32_t us)
 {
     /* Approximate cycles per microsecond */
     uint32_t cycles = (CLK_FREQ_HOSC / 1000000UL) * us;
-    
+
     /* Simple loop - each iteration is roughly 4 cycles */
     volatile uint32_t i;
     for (i = 0; i < cycles / 4; i++) {
@@ -439,11 +439,11 @@ void hal_init(void)
     /* Clear interrupt handler tables */
     memset(irq_table, 0, sizeof(irq_table));
     memset(intc_table, 0, sizeof(intc_table));
-    
+
     /* Disable all Xtensa core interrupt inputs */
     xtensa_set_intenable(0);
-    
-    /* 
+
+    /*
      * Initialize DSP_INTC (peripheral interrupt controller)
      * Disable all peripheral interrupts initially
      */
@@ -454,13 +454,14 @@ void hal_init(void)
     REG32(DSP_INTC_BASE + DSP_INTC_MASK0) = 0;
     REG32(DSP_INTC_BASE + DSP_INTC_MASK1) = 0;
     REG32(DSP_INTC_BASE + DSP_INTC_MASK2) = 0;
-    
+
     /* Clear all pending interrupts in DSP_INTC */
     /* Note: Writing 1 to clear pending bits */
     REG32(DSP_INTC_BASE + DSP_INTC_PEND0) = 0xFFFFFFFF;
     REG32(DSP_INTC_BASE + DSP_INTC_PEND1) = 0xFFFFFFFF;
     REG32(DSP_INTC_BASE + DSP_INTC_PEND2) = 0xFFFFFFFF;
 
+    cache_init();
     cache_enable_ddr();
     watchdog_stop();
 
@@ -480,16 +481,16 @@ void hal_debug_hex(uint32_t value)
 {
     static const char hex_chars[] = "0123456789ABCDEF";
     char buf[11];
-    
+
     buf[0] = '0';
     buf[1] = 'x';
-    
+
     for (volatile int i = 0; i < 8; i++) {
         buf[9 - i] = hex_chars[value & 0xF];
         value >>= 4;
     }
     buf[10] = '\0';
-    
+
     uart_puts(UART_0, buf);
 }
 
@@ -517,29 +518,29 @@ void hal_restart(void)
 {
     /* Disable all interrupts */
     irq_global_disable();
-    
+
     /* Clear INTENABLE to prevent any interrupt from firing */
     __asm__ volatile("wsr.intenable %0" :: "a"(0));
-    
+
     /* Flush data cache to ensure memory is consistent */
     dcache_writeback_all();
-    
+
     /* Invalidate instruction cache so we fetch fresh code */
     icache_invalidate_all();
-    
+
     /* Memory barrier */
     __asm__ volatile("dsync");
     __asm__ volatile("isync");
 
     extern uint32_t _memmap_reset_vector;
-    
+
     /* Jump to reset vector - this function never returns */
     __asm__ volatile(
         "jx %0"
         :
         : "a"(&_memmap_reset_vector)
     );
-    
+
     /* Should never reach here */
     __builtin_unreachable();
 }
