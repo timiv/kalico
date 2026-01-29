@@ -1,13 +1,13 @@
 /**
  * @file hal.h
  * @brief Simple HAL for Allwinner R528/T113 HiFi4 DSP
- * 
+ *
  * Copyright (C) 2025  James Turton <james.turton@gmx.com>
  * This file may be distributed under the terms of the GNU GPLv3 license.
- * 
+ *
  * A minimal baremetal HAL providing GPIO, UART, and ADC functionality
  * with interrupt support for the HiFi4 DSP core.
- * 
+ *
  * Register addresses are based on the R528/T113 User Manual.
  */
 
@@ -353,37 +353,41 @@ typedef struct {
 #define GPADC_CH0_DATA      0x80    /* Channel 0 Data Register */
 
 /* GPADC_SR_CON bits */
-#define GPADC_SR_CON_FS_DIV_MASK    GENMASK(15, 0)
-#define GPADC_SR_CON_TACQ_MASK      GENMASK(31, 16)
+#define GPADC_SR_CON_TACQ_MASK      GENMASK(15, 0)
+#define GPADC_SR_CON_FS_DIV_MASK    GENMASK(31, 16)
 
 /* GPADC_CTRL bits */
-#define GPADC_CTRL_ADC_EN           BIT(0)
-#define GPADC_CTRL_ADC_AUTOCALI_EN  BIT(1)
-#define GPADC_CTRL_WORK_MODE_MASK   GENMASK(5, 4)
-#define GPADC_CTRL_WORK_MODE_SINGLE (0 << 4)
-#define GPADC_CTRL_WORK_MODE_CONT   (2 << 4)
-#define GPADC_CTRL_WORK_MODE_BURST  (3 << 4)
+#define GPADC_CTRL_ADC_EN           BIT(16)
 #define GPADC_CTRL_ADC_CALI_EN      BIT(17)
+#define GPADC_CTRL_WORK_MODE_MASK   GENMASK(19, 18)
+#define GPADC_CTRL_WORK_MODE_SINGLE (0 << 18)
+#define GPADC_CTRL_WORK_MODE_CONT   (2 << 18)
+#define GPADC_CTRL_WORK_MODE_BURST  (3 << 18)
+#define GPADC_CTRL_ADC_AUTOCALI_EN  BIT(23)
+#define GPADC_CTRL_FIRST_DLY_MASK   GENMASK(31, 24)
 
 /* GPADC_CS_EN bits */
 #define GPADC_CS_EN_CH(n)           BIT(n)
 #define GPADC_CS_EN_CMP(n)          BIT((n) + 16)
 
 /* GPADC_FIFO_INTC bits */
-#define GPADC_FIFO_INTC_DATA_DRQ_EN BIT(16)
+#define GPADC_FIFO_INTC_DATA_IRQ_EN BIT(16)
 #define GPADC_FIFO_INTC_OVERRUN_EN  BIT(17)
-#define GPADC_FIFO_INTC_DATA_IRQ_EN BIT(18)
+#define GPADC_FIFO_INTC_DATA_DRQ_EN BIT(18)
 #define GPADC_FIFO_INTC_FLUSH       BIT(21)
 
 /* GPADC_FIFO_INTS bits */
+#define GPADC_FIFO_INTS_DATA        BIT(16)
 #define GPADC_FIFO_INTS_OVERRUN     BIT(17)
-#define GPADC_FIFO_INTS_DATA        BIT(18)
 
 /* GPADC_DATA_INTC bits */
 #define GPADC_DATA_INTC_CH(n)       BIT(n)
 
 /* GPADC_DATA_INTS bits */
-#define GPADC_DATA_INTS_CH(n)       BIT(n)
+#define GPADC_DATA_INTS_CH(n) BIT(n)
+
+/* GPADC_CH0_DATA bits */
+#define GPADC_CH0_DATA_MASK         GENMASK(11, 0)
 
 /* T113 has 1 channel, D1 has 2 channels, R329/T507 have 4 channels */
 #define GPADC_MAX_CHANNELS  4
@@ -412,14 +416,14 @@ typedef enum {
  *============================================================================*/
 
 /* HiFi4 DSP Interrupt Numbers (from DSP_CORE Interrupt Source table)
- * 
+ *
  * The HiFi4 DSP core has its own interrupt inputs. These are the interrupt
  * numbers as they appear to the DSP core.
- * 
+ *
  * Note: The DSP uses a 2-level interrupt scheme for many peripherals:
  * - Direct DSP core interrupts (e.g., TIMER0, TIMER1, HSTIMER0, HSTIMER1)
  * - DSP_INTC routed interrupts (most peripherals go through IRQ 17)
- * 
+ *
  * For INTC-routed interrupts, the handler for IRQ 17 (INTC) should check
  * DSP_INTC registers to determine which specific peripheral triggered it.
  */
@@ -553,7 +557,7 @@ void irq_global_disable(void);
  * @param intc_num INTC interrupt number (INTC_UART0, INTC_SPI0, etc.)
  * @param handler Handler function
  * @param arg User argument passed to handler
- * 
+ *
  * Note: These interrupts go through the DSP_INTC and trigger IRQ_INTC (17)
  */
 void intc_register(uint32_t intc_num, irq_handler_t handler, void *arg);
@@ -804,7 +808,7 @@ void uart_set_rx_callback(uart_id_t uart_id, irq_handler_t callback, void *arg);
  * @param uart_id UART identifier
  * @param callback Function to call when FIFO has space
  * @param arg User argument passed to callback
- * 
+ *
  * Note: TX interrupt fires when FIFO transitions from full to not-full.
  * Useful for implementing non-blocking bulk transfers.
  */
@@ -825,7 +829,7 @@ void uart_disable_rx_irq(uart_id_t uart_id);
 /**
  * @brief Enable transmit interrupt
  * @param uart_id UART identifier
- * 
+ *
  * TX interrupt fires when the remote side reads from the FIFO,
  * making space available for new messages.
  */
@@ -1324,7 +1328,7 @@ void hstimer_get_counter(hstimer_id_t hstimer_id, uint32_t *lo, uint32_t *hi);
  * @param ticks_lo Output: lower 32 bits of ticks
  * @param ticks_hi Output: upper 24 bits of ticks
  */
-void hstimer_us_to_ticks(hstimer_id_t hstimer_id, uint32_t interval_us, 
+void hstimer_us_to_ticks(hstimer_id_t hstimer_id, uint32_t interval_us,
                          uint32_t *ticks_lo, uint32_t *ticks_hi);
 
 /*============================================================================
@@ -1547,21 +1551,21 @@ uint16_t pwm_get_counter(pwm_channel_t channel);
 
 /*
  * The MSGBOX provides hardware FIFOs for inter-processor communication.
- * 
+ *
  * Architecture:
  * - ARM CPUX has its MSGBOX at 0x03003000
  * - DSP has its MSGBOX at 0x01701000
  * - Each MSGBOX accesses the SAME shared FIFOs from different perspectives
- * 
+ *
  * Register addressing:
  * - N = Remote CPU index (for DSP talking to ARM, N=0)
  * - P = Channel number (0-3 channels available)
- * 
+ *
  * Communication model:
  * - At the SAME channel P, user1 (transmitter) writes, user0 (receiver) reads
  * - From DSP's perspective: DSP is user1 (TX), ARM is user0 (RX)
  * - So DSP uses WR registers to send, RD registers to receive from ARM
- * 
+ *
  * FIFO: 8 messages deep, each message is 32 bits
  */
 
@@ -1728,11 +1732,11 @@ void msgbox_flush_rx(uint8_t channel);
 
 /**
  * @brief Invalidate a region of data cache
- * 
+ *
  * Marks cache lines in the specified region as invalid, so subsequent
  * reads will fetch from main memory. Use this before reading data that
  * may have been modified by DMA or another processor.
- * 
+ *
  * @param addr Start address (will be aligned down to cache line)
  * @param size Size in bytes (will be rounded up to cache line)
  */
@@ -1740,11 +1744,11 @@ void dcache_region_invalidate(void *addr, uint32_t size);
 
 /**
  * @brief Write back a region of data cache to memory
- * 
+ *
  * Writes any dirty cache lines in the specified region back to main
  * memory. Use this after writing data that will be read by DMA or
  * another processor.
- * 
+ *
  * @param addr Start address (will be aligned down to cache line)
  * @param size Size in bytes (will be rounded up to cache line)
  */
@@ -1752,10 +1756,10 @@ void dcache_region_writeback(void *addr, uint32_t size);
 
 /**
  * @brief Write back and invalidate a region of data cache
- * 
+ *
  * Combines writeback and invalidate operations. Use this when the
  * region will be both written by the CPU and modified externally.
- * 
+ *
  * @param addr Start address (will be aligned down to cache line)
  * @param size Size in bytes (will be rounded up to cache line)
  */
@@ -1778,10 +1782,10 @@ void dcache_writeback_invalidate_all(void);
 
 /**
  * @brief Invalidate a region of instruction cache
- * 
+ *
  * Use this after loading new code into memory to ensure the processor
  * fetches the new instructions.
- * 
+ *
  * @param addr Start address
  * @param size Size in bytes
  */
@@ -1794,7 +1798,7 @@ void icache_invalidate_all(void);
 
 /**
  * @brief Synchronize caches and memory
- * 
+ *
  * Ensures all pending cache operations complete and memory is consistent.
  */
 void cache_sync(void);
@@ -1811,7 +1815,7 @@ void cache_dump_config(void);
 
 /**
  * @brief Enable caching for the 0x30000000 DDR region
- * 
+ *
  * Quick function to just enable cache for the DDR region your code uses.
  */
 void cache_enable_ddr(void);
