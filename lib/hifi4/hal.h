@@ -384,7 +384,7 @@ typedef struct {
 #define GPADC_DATA_INTC_CH(n)       BIT(n)
 
 /* GPADC_DATA_INTS bits */
-#define GPADC_DATA_INTS_CH(n) BIT(n)
+#define GPADC_DATA_INTS_CH(n)       BIT(n)
 
 /* GPADC_CH0_DATA bits */
 #define GPADC_CH0_DATA_MASK         GENMASK(11, 0)
@@ -862,6 +862,26 @@ void gpadc_channel_enable(gpadc_channel_t channel);
  * @param channel Channel to disable
  */
 void gpadc_channel_disable(gpadc_channel_t channel);
+
+/**
+ * @brief Returns if an ADC channel is enabled
+ * @param channel Channel to check
+ * @return true if enabled, false if disabled
+ */
+bool gpadc_is_channel_enabled(gpadc_channel_t channel);
+
+/**
+ * @brief Check if ADC channel has completed conversion and is ready
+ * @param channel Channel to check
+ * @return true if conversion data is ready
+ */
+bool gpadc_is_channel_ready(gpadc_channel_t channel);
+
+/**
+ * @brief Clear ADC channel ready flag
+ * @param channel Channel to clear
+ */
+void gpadc_clear_channel_ready(gpadc_channel_t channel);
 
 /**
  * @brief Read ADC value from a channel (blocking)

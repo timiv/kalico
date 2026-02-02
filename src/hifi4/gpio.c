@@ -8,6 +8,7 @@
 #include "generic/misc.h"
 #include "command.h"
 #include "sched.h" // sched_shutdown
+#include "board/irq.h" // irq_save
 
 DECL_ENUMERATION_RANGE("pin", "PB0", 1*32, 16); //13 + 3 ADC pins
 DECL_ENUMERATION_RANGE("pin", "PC0", 2*32, 8);
@@ -71,23 +72,47 @@ struct gpio_adc gpio_adc_setup(uint8_t pin) {
 
     // Initialize the GPADC
     gpadc_init(1000);
-    gpadc_channel_enable(chan);
+    //gpadc_channel_enable(chan);
 
     // Small delay for ADC to start converting
     for (volatile int i = 0; i < 10000; i++);
 
     return (struct gpio_adc){ .chan=chan };
 }
+
+// Try to sample a value. Returns zero if sample ready, otherwise
+// returns the number of clock ticks the caller should wait before
+// retrying this function.
 uint32_t gpio_adc_sample(struct gpio_adc g) {
-    // No delay needed - continuous mode always has fresh data
+
+    // If channel is not yet enabled, enable it and wait for the sample
+    if (!gpadc_is_channel_enabled(g.chan)) {
+        gpadc_channel_enable(g.chan);
+        return timer_from_us(10); // Wait until data is ready
+    }
+
+    // If channel is active but data is not yet availabe, wait a little bit
+    if (!gpadc_is_channel_ready(g.chan))
+      return timer_from_us(5);
+
+    // Data is ready,
     return 0;
 }
+
+// Read a value; use only after gpio_adc_sample() returns zero
 uint16_t gpio_adc_read(struct gpio_adc g) {
-    // Direct register read - same as original DSP implementation
-    return gpadc_read_data(g.chan);
+    gpadc_clear_channel_ready(g.chan);
+    uint16_t value = gpadc_read_data(g.chan);
+    gpadc_channel_disable(g.chan);
+    return value;
 }
+
+// Cancel a sample that may have been started with gpio_adc_sample()
 void gpio_adc_cancel_sample(struct gpio_adc g) {
-    // Keep channel running; cancellation is a no-op for this ADC
+    irqstatus_t flag = irq_save();
+    if (gpadc_is_channel_enabled(g.chan))
+        gpio_adc_read(g);
+    irq_restore(flag);
 }
 
 struct spi_config
