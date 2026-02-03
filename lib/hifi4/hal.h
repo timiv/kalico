@@ -1786,11 +1786,6 @@ void dcache_region_writeback(void *addr, uint32_t size);
 void dcache_region_writeback_invalidate(void *addr, uint32_t size);
 
 /**
- * @brief Invalidate entire data cache
- */
-void dcache_invalidate_all(void);
-
-/**
  * @brief Write back entire data cache
  */
 void dcache_writeback_all(void);
@@ -1812,11 +1807,6 @@ void dcache_writeback_invalidate_all(void);
 void icache_region_invalidate(void *addr, uint32_t size);
 
 /**
- * @brief Invalidate entire instruction cache
- */
-void icache_invalidate_all(void);
-
-/**
  * @brief Synchronize caches and memory
  *
  * Ensures all pending cache operations complete and memory is consistent.
@@ -1824,26 +1814,9 @@ void icache_invalidate_all(void);
 void cache_sync(void);
 
 /**
- * @brief Initialize caches with recommended settings for R528 DSP
- */
-void cache_init(void);
-
-/**
  * @brief Print cache configuration for debugging
  */
 void cache_dump_config(void);
-
-/**
- * @brief Enable caching for the 0x30000000 DDR region
- *
- * Quick function to just enable cache for the DDR region your code uses.
- */
-void cache_enable_ddr(void);
-
-/**
- * @brief Disable all caching (everything bypass)
- */
-void cache_disable_all(void);
 
 /*============================================================================
  * Debug/Diagnostic Functions

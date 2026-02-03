@@ -118,30 +118,6 @@ void icache_region_invalidate(void *addr, uint32_t size)
  * Whole Cache Operations
  *============================================================================*/
 
-void dcache_invalidate_all(void)
-{
-    /*
-     * Index-based invalidate iterates through all cache indices.
-     * For a 32KB, 4-way, 64-byte line cache:
-     *   Sets = 32768 / (64 * 4) = 128 sets
-     *
-     * Cache index format for DII instruction:
-     *   bits [5:0]    = line offset (6 bits, LINEWIDTH)
-     *   bits [12:6]   = set index (7 bits, SETWIDTH)
-     *   bits [14:13]  = way (2 bits for 4-way)
-     * Total index = (way << DCACHE_WAY_SHIFT) | (set << DCACHE_LINEWIDTH)
-     */
-    uint32_t sets = DCACHE_SIZE / (DCACHE_LINE_SIZE * DCACHE_WAYS);
-
-    for (uint32_t way = 0; way < DCACHE_WAYS; way++) {
-        for (uint32_t set = 0; set < sets; set++) {
-            uint32_t index = (way << DCACHE_WAY_SHIFT) | (set << XCHAL_DCACHE_LINEWIDTH);
-            __asm__ volatile("dii %0, 0" :: "a"(index));
-        }
-    }
-    __asm__ volatile("dsync");
-}
-
 void dcache_writeback_all(void)
 {
     uint32_t sets = DCACHE_SIZE / (DCACHE_LINE_SIZE * DCACHE_WAYS);
@@ -168,28 +144,6 @@ void dcache_writeback_invalidate_all(void)
     __asm__ volatile("dsync");
 }
 
-void icache_invalidate_all(void)
-{
-    /*
-     * Index-based invalidate for instruction cache.
-     * For a 32KB, 2-way, 64-byte line cache:
-     *   Sets = 32768 / (64 * 2) = 256 sets (8 bits)
-     *
-     * Cache index format for III instruction:
-     *   bits [5:0]    = line offset (6 bits, LINEWIDTH)
-     *   bits [13:6]   = set index (8 bits, SETWIDTH)
-     *   bits [14]     = way (1 bit for 2-way)
-     */
-    uint32_t sets = ICACHE_SIZE / (ICACHE_LINE_SIZE * ICACHE_WAYS);
-
-    for (uint32_t way = 0; way < ICACHE_WAYS; way++) {
-        for (uint32_t set = 0; set < sets; set++) {
-            uint32_t index = (way << ICACHE_WAY_SHIFT) | (set << XCHAL_ICACHE_LINEWIDTH);
-            __asm__ volatile("iii %0, 0" :: "a"(index));
-        }
-    }
-    __asm__ volatile("isync");
-}
 
 void cache_sync(void)
 {
@@ -228,97 +182,6 @@ static uint32_t read_itlb(uint32_t vaddr)
     return result;
 }
 
-/**
- * @brief Write DTLB entry
- * @param vaddr Virtual address (determines which TLB entry)
- * @param pte Page table entry value (PPN + attributes)
- *
- * For spanning way, vaddr selects the 512MB region.
- * The entry value format depends on the config, typically:
- *   [31:12] = Physical page number (PPN)
- *   [3:0] = Cache attribute
- */
-static void write_dtlb(uint32_t vaddr, uint32_t pte)
-{
-    __asm__ volatile(
-        "wdtlb %0, %1\n"
-        "dsync\n"
-        :: "a"(pte), "a"(vaddr)
-    );
-}
-
-/**
- * @brief Write ITLB entry
- */
-static void write_itlb(uint32_t vaddr, uint32_t pte)
-{
-    __asm__ volatile(
-        "witlb %0, %1\n"
-        "isync\n"
-        :: "a"(pte), "a"(vaddr)
-    );
-}
-
-/**
- * @brief Set cache attribute for a memory region
- * @param vaddr Start of 512MB region (0x00000000, 0x20000000, etc.)
- * @param attr Cache attribute (CA_BYPASS, CA_WRITEBACK, etc.)
- *
- * For identity mapping (vaddr == paddr), we just need to set the attribute.
- */
-void cache_set_region_attr(uint32_t vaddr, uint32_t attr)
-{
-    /* Read current entry to get PPN */
-    uint32_t dtlb = read_dtlb(vaddr);
-    uint32_t itlb = read_itlb(vaddr);
-
-    /* Clear old attribute, set new one */
-    dtlb = (dtlb & ~0xF) | (attr & 0xF);
-    itlb = (itlb & ~0xF) | (attr & 0xF);
-
-    /* Write back */
-    write_dtlb(vaddr, dtlb);
-    write_itlb(vaddr, itlb);
-}
-
-/*============================================================================
- * Cache Initialization
- *============================================================================*/
-
-/**
- * @brief Initialize caches
- *
- * On this TLB-based system, cache behavior depends on TLB entries.
- * The default TLB setup (from reset vector/LSP) should already have
- * reasonable settings. We just invalidate to start fresh.
- */
-void cache_init(void)
-{
-    /* Invalidate both caches */
-    icache_invalidate_all();
-    dcache_invalidate_all();
-
-    __asm__ volatile("dsync");
-    __asm__ volatile("isync");
-}
-
-/**
- * @brief Enable caching for DDR region at 0x30000000
- *
- * Sets the 0x20000000-0x3FFFFFFF region to write-back cached.
- */
-void cache_enable_ddr(void)
-{
-    /* Flush and invalidate first */
-    dcache_writeback_invalidate_all();
-    icache_invalidate_all();
-
-    /* Set region 1 (0x20000000-0x3FFFFFFF) to write-back */
-    cache_set_region_attr(0x20000000, CA_WRITEBACK);
-
-    __asm__ volatile("dsync");
-    __asm__ volatile("isync");
-}
 
 /*============================================================================
  * Debug Functions

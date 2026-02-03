@@ -443,6 +443,8 @@ void hal_init(void)
     /* Disable all Xtensa core interrupt inputs */
     xtensa_set_intenable(0);
 
+    cache_dump_config();
+
     /*
      * Initialize DSP_INTC (peripheral interrupt controller)
      * Disable all peripheral interrupts initially
@@ -461,8 +463,6 @@ void hal_init(void)
     REG32(DSP_INTC_BASE + DSP_INTC_PEND1) = 0xFFFFFFFF;
     REG32(DSP_INTC_BASE + DSP_INTC_PEND2) = 0xFFFFFFFF;
 
-    cache_init();
-    cache_enable_ddr();
     watchdog_stop();
 
     /* Enable global interrupts */
@@ -524,9 +524,6 @@ void hal_restart(void)
 
     /* Flush data cache to ensure memory is consistent */
     dcache_writeback_all();
-
-    /* Invalidate instruction cache so we fetch fresh code */
-    icache_invalidate_all();
 
     /* Memory barrier */
     __asm__ volatile("dsync");

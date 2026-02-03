@@ -15,6 +15,23 @@ PHDRS
 PROVIDE(_memmap_reset_vector = 0x00400660);
 PROVIDE(_memmap_vecbase_reset = 0x00401000);
 
+/*
+ * Cache attribute configuration for 8 x 512MB regions.
+ * Each nibble (4 bits) specifies the cache attribute for one region:
+ *   0 = No access (exception on access)
+ *   1 = Bypass (uncached, for device/MMIO)
+ *   2 = Bypass (uncached, for device/MMIO)
+ *   4 = Write-back cached
+ *   5 = Write-back no-allocate
+ *
+ * Memory map:
+ *   Region 0: 0x00000000-0x1FFFFFFF (IRAM/DRAM at 0x004xxxxx) - bypass
+ *   Region 1: 0x20000000-0x3FFFFFFF (DDR at 0x32000000) - write-back
+ *   Region 2-7: 0x40000000-0xFFFFFFFF - bypass
+ */
+_memmap_cacheattr_wb_trapnull = 0x22222242;
+PROVIDE(_memmap_cacheattr_reset = _memmap_cacheattr_wb_trapnull);
+
 SECTIONS
 {
     /* OEM header section at start of IRAM */
@@ -22,7 +39,7 @@ SECTIONS
         _oemhead_text_start = ABSOLUTE(.);
         KEEP(*(.oemhead.text))
     } > iram0 :iram0_phdr
-    
+
     ._xt_int_enter.literal : ALIGN(4) {
         *(._xt_int_enter.literal)
     } > iram0 :iram0_phdr
@@ -30,44 +47,44 @@ SECTIONS
     .text._xt_int_enter : ALIGN(4) {
         KEEP(*(.text._xt_int_enter))
     } > iram0 :iram0_phdr
-    
+
     .ResetVector.literal : ALIGN(4) {
         *(.ResetVector.literal)
     } > iram0 :iram0_phdr
-    
+
     .ResetVector.text 0x00400660 : ALIGN(4) {
         *(.ResetVector.text)
     } > iram0 :iram0_phdr
-    
+
     /* Interrupt vectors at vecbase + offsets */
     .Level2InterruptVector.text 0x0040117C : ALIGN(4) {
         KEEP(*(.Level2InterruptVector.text))
     } > iram0 :iram0_phdr
-    
+
     .Level3InterruptVector.text 0x0040119C : ALIGN(4) {
         KEEP(*(.Level3InterruptVector.text))
     } > iram0 :iram0_phdr
-    
+
     .DebugExceptionVector.text 0x004011BC : ALIGN(4) {
         KEEP(*(.DebugExceptionVector.text))
     } > iram0 :iram0_phdr
-    
+
     .NMIExceptionVector.text 0x004011DC : ALIGN(4) {
         KEEP(*(.NMIExceptionVector.text))
     } > iram0 :iram0_phdr
-    
+
     .KernelExceptionVector.text 0x004011FC : ALIGN(4) {
         KEEP(*(.KernelExceptionVector.text))
     } > iram0 :iram0_phdr
-    
+
     .UserExceptionVector.text 0x0040121C : ALIGN(4) {
         KEEP(*(.UserExceptionVector.text))
     } > iram0 :iram0_phdr
-    
+
     .DoubleExceptionVector.text 0x0040123C : ALIGN(4) {
         KEEP(*(.DoubleExceptionVector.text))
     } > iram0 :iram0_phdr
-    
+
     .text : ALIGN(4) {
         *(.literal .literal.* .text .text.*)
         *(.stub)
@@ -76,13 +93,13 @@ SECTIONS
         *(.fini)
         *(.gnu.version)
     } > ddr1 :ddr1_phdr
-    
+
     .rodata : ALIGN(4) {
         *(.rodata .rodata.*)
         *(.gnu.linkonce.r.*)
         *(.rodata1)
     } > ddr1 :ddr1_phdr
-    
+
     .data : ALIGN(4) {
         *(.data .data.*)
         *(.gnu.linkonce.d.*)
@@ -90,7 +107,7 @@ SECTIONS
         *(.sdata .sdata.* .sdata2.*)
         *(.gnu.linkonce.s.*)
     } > ddr1 :ddr1_phdr
-    
+
     .bss (NOLOAD) : ALIGN(4) {
         _bss_start = ABSOLUTE(.);
         *(.dynsbss)
@@ -102,7 +119,7 @@ SECTIONS
         . = ALIGN(4);
         _bss_end = ABSOLUTE(.);
     } > ddr1 :ddr1_phdr
-    
+
     /* Heap section - place after BSS */
     .heap (NOLOAD) : ALIGN(8) {
         _heap_start = ABSOLUTE(.);
@@ -115,9 +132,9 @@ SECTIONS
         . = . + 0x8000;  /* 32KB stack */
         _stack_end = ABSOLUTE(.);
     } > ddr1 :ddr1_phdr
-    
+
     /* Update stack pointer to point to END of stack section */
     PROVIDE(__stack = _stack_end);
-    
+
     _end = .;
 }
