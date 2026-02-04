@@ -769,12 +769,16 @@ class MCU:
             ):
                 self._baud = config.getint("baud", 250000, minval=2400)
         # Restarts
-        restart_methods = [None, "arduino", "cheetah", "command", "rpi_usb"]
+        restart_methods = [None, "arduino", "cheetah", "command", "rpi_usb", "power"]
         self._restart_method = "command"
         if self._baud:
             self._restart_method = config.getchoice(
                 "restart_method", restart_methods, None
             )
+        power_pin_name = config.get('power_pin', None)
+        if power_pin_name:
+            # Example: PE12
+            self._power_pin = (ord(power_pin_name[1]) - ord('A')) * 32 + int(power_pin_name[2:])
         self._reset_cmd = self._config_reset_cmd = None
         self._is_mcu_bridge = False
         self._emergency_stop_cmd = None
@@ -1371,6 +1375,49 @@ class MCU:
         self._disconnect()
         serialhdl.cheetah_reset(self._serialport, self._reactor)
 
+    def _restart_via_power_pin(self):
+        logging.info("Attempting MCU '%s' reset via power pin", self._name)
+        self._disconnect()
+
+        gpio_sysfs_path = "/sys/class/gpio/gpio%d" % self._power_pin
+
+        # Turn off power pin on this machine
+        if not os.path.exists(gpio_sysfs_path):
+            with open("/sys/class/gpio/export", 'w') as ef:
+                ef.write(str(self._power_pin))
+
+        # Wait a moment for sysfs to create the gpio entry
+        self._reactor.pause(self._reactor.monotonic() + 0.500)
+
+
+        # Configure the direction
+        with open(gpio_sysfs_path + "/direction", 'w') as df:
+            df.write("out")
+
+        # Set the pin low to cut power
+        with open(gpio_sysfs_path + "/value", 'w') as vf:
+            vf.write("0")
+
+        # Wait for one second
+        self._reactor.pause(self._reactor.monotonic() + 1.000)
+
+        # Set the pin high to restore power
+        with open(gpio_sysfs_path + "/value", 'w') as vf:
+            vf.write("1")
+
+        # Wait for two seconds to allow the MCU to boot into bootloader
+        self._reactor.pause(self._reactor.monotonic() + 2.000)
+
+        # Abort DFU by sending 'A' to the serial port
+        serialport, baud = self._conn_helper.get_serialport()
+        with open(serialport, 'wb') as sf:
+            sf.write(b'A')
+
+        # Wait for three seconds to allow the MCU to boot fully
+        self._reactor.pause(self._reactor.monotonic() + 3.000)
+
+        logging.info("reset of MCU '%s' done", self._name)
+
     def _restart_via_command(self):
         if (
             self._reset_cmd is None and self._config_reset_cmd is None
@@ -1411,6 +1458,8 @@ class MCU:
             self._restart_via_command()
         elif self._restart_method == "cheetah":
             self._restart_cheetah()
+        elif self._restart_method == "power":
+            self._restart_via_power_pin()
         else:
             self._restart_arduino()
 
