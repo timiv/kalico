@@ -107,12 +107,11 @@ struct hx711s_sensor {
     uint8_t is_bottom_detection;
     int32_t probe_check_cmd;
     uint8_t is_running_check;
-    uint8_t flags;
-    uint8_t is_calibration;
-    uint8_t is_trigger;
-    uint8_t trigger_index;
-    uint8_t now_trigger;
-    uint32_t trigger_tick;
+    uint8_t flags;                  // bit 0 = START
+    uint8_t is_calibration;         // bit 0 = calibration mode, bit 7 = calibration complete, bi 0 = ch1, 1 = ch2, etc.
+    uint8_t is_trigger;             // Last trigger (bit coded by channel) bit 0 = ch1, 1 = ch2, etc.; bit 5 = fusion
+    uint8_t trigger_index;          // Index of the triggered point on the bed
+    uint32_t trigger_tick;          // Tick count when trigger was first detected
 
     // trsync for homing/probing integration
     struct trsync *ts;

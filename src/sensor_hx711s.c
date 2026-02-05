@@ -14,6 +14,7 @@
 #include "trsync.h"  // trsync_do_trigger
 #include "sensor_hx711s.h"
 #include <string.h>
+#include <math.h>
 
 /****************************************************************
  * Module State
@@ -204,6 +205,7 @@ sliding_window_avg_exception_filter(int index, int max_data_num,
  * Position-to-Index Mapping (6x6 grid)
  ****************************************************************/
 
+#if 0
 static int32_t
 position_to_grid_index(int32_t x, int32_t y)
 {
@@ -221,6 +223,7 @@ position_to_grid_index(int32_t x, int32_t y)
 
     return x_idx * 6 + y_idx;
 }
+#endif
 
 /****************************************************************
  * Low-Level ADC Reading (HX711 bit-bang)
@@ -260,6 +263,9 @@ hx711s_read_sensor(struct hx711s_sensor *h, uint8_t sensor_idx)
 
     irq_disable();
 
+    // Capture the timestamp as early as possible to minimize timing errors.
+    int capture_time = timer_read_time();
+
     gpio_out_write(h->clks[sensor_idx], 0);
 
     int32_t value = 0;
@@ -283,6 +289,7 @@ hx711s_read_sensor(struct hx711s_sensor *h, uint8_t sensor_idx)
         value |= 0xFF000000;
 
     h->sample_values[sensor_idx] = value;
+    h->time_stamp[sensor_idx] = capture_time;
 
     irq_enable();
     return 1;
@@ -410,7 +417,7 @@ find_trigger_index_new(int32_t *array, struct hx711s_sensor *h)
 {
     static int32_t last_point_count = 0;
     double val[HX711S_MAX_DATA_NUM] = {0};
-    double val_norm[HX711S_MAX_DATA_NUM] = {0};
+    double val_transfer[HX711S_MAX_DATA_NUM] = {0};
     int max_num = h->max_data_num;
 
     // Ensure data direction is ascending
@@ -422,80 +429,110 @@ find_trigger_index_new(int32_t *array, struct hx711s_sensor *h)
             val[i] = array[i];
     }
 
-    // Normalize to [0, 1]
+    // Normalize data to [0..1]
     double val_min = val[max_num - 1], val_max = val[0];
     for (int i = 0; i < max_num; i++) {
         if (val[i] < val_min) val_min = val[i];
         if (val[i] > val_max) val_max = val[i];
     }
-    double range = val_max - val_min;
-    if (range < 1.0) range = 1.0;
+    double val_err = val_max - val_min;
+    if (val_err < 1e-15) val_err = 1e-15; // prevent division by zero
 
     for (int i = 0; i < max_num; i++)
-        val_norm[i] = (val[i] - val_min) / range;
+        val_transfer[i] = (val[i] - val_min) / val_err;
 
-    // Linear regression: find point where normalized value crosses threshold
+
+    // Calculate and rotate the data by a given angle to facilitate the c
+    // calculation of the earliest trigger point
+    double angle = atan((val_transfer[max_num - 1] - val_transfer[0]) /
+                          (max_num - 1));
+    double sinAngle = sin(-angle);
+    double cosAngle = cos(-angle);
+
+    // Rotate around the origin (0,0) by angle degrees clockwise.
+    // Here we can ignore the X-axis coordinate values.
+    for (int i = 0; i < max_num; i++) {
+      val_transfer[i] =
+          ((i - 0) * sinAngle) + ((val_transfer[i] - 0) * cosAngle) + 0;
+    }
+
+    // Find the index of the minimum value after rotation
+    double min_val = val_transfer[0];
     int32_t linear_out_index = 0;
     for (int i = max_num - 1; i >= 0; i--) {
-        if (val_norm[i] < 0.1) {
+        if (min_val > val_transfer[i]) {
+            min_val = val_transfer[i];
             linear_out_index = i;
-            break;
         }
     }
     out_index = linear_out_index;
 
+    // Linear regression + slope fallback
+    kk = (val[max_num - 1] - val[out_index]) / (max_num - out_index);
+
     // Calculate slope for compensation
     if (h->find_index_mode & 0x08) {
         // Fixed pattern slope calculation
-        kk = (int32_t)(val[max_num - 1] - val[0]);
+        fix_out_index = kk*k_slope / 10000 - bias_slope / 10;
     } else {
-        // Linear fit slope calculation
-        double sum_x = 0, sum_y = 0, sum_xy = 0, sum_xx = 0;
-        int n = max_num;
-        for (int i = 0; i < n; i++) {
-            sum_x += i;
-            sum_y += val[i];
-            sum_xy += i * val[i];
-            sum_xx += i * i;
+        if (kk > 2300) {
+          fix_out_index = 11;
         }
-        double slope = (n * sum_xy - sum_x * sum_y) /
-                       (n * sum_xx - sum_x * sum_x + 0.0001);
-        kk = (int32_t)(slope * k_slope / 100);
+        else if (kk > 2200) {
+          fix_out_index = 10;
+        }
+        else if (kk > 2100) {
+          fix_out_index = 9;
+        }
+        else if (kk > 2000) {
+          fix_out_index = 8;
+        }
+        else if (kk > 1900) {
+          fix_out_index = 7;
+        }
+        else if (kk > 1700) {
+          fix_out_index = 6;
+        }
+        else if (kk > 1600) {
+          fix_out_index = 5;
+        }
+        else if (kk > 1500) {
+          fix_out_index = 4;
+        }
+        else if (kk > 1300) {
+          fix_out_index = 3;
+        }
+        else if (kk > 1000) {
+          fix_out_index = 2;
+        }
+        else if (kk > 900) {
+          fix_out_index = 1;
+        }
+        else if (kk > 800) {
+          fix_out_index = 0;
+        }
+        else if (kk > 700) {
+          fix_out_index = -1;
+        }
+        else if (kk > 600) {
+          fix_out_index = -2;
+        }
+        else if (kk > 500) {
+          fix_out_index = -3;
+        }
+        else if (kk > 400) {
+          fix_out_index = -4;
+        }
+        else  {
+          fix_out_index = -5;
+        }
     }
-
-    // Calculate compensation index based on slope
-    if (kk > 2000)
-        fix_out_index = 7;
-    else if (kk > 1800)
-        fix_out_index = 6;
-    else if (kk > 1600)
-        fix_out_index = 5;
-    else if (kk > 1500)
-        fix_out_index = 4;
-    else if (kk > 1300)
-        fix_out_index = 3;
-    else if (kk > 1000)
-        fix_out_index = 2;
-    else if (kk > 900)
-        fix_out_index = 1;
-    else if (kk > 800)
-        fix_out_index = 0;
-    else if (kk > 700)
-        fix_out_index = -1;
-    else if (kk > 600)
-        fix_out_index = -2;
-    else if (kk > 500)
-        fix_out_index = -3;
-    else if (kk > 400)
-        fix_out_index = -4;
-    else
-        fix_out_index = -5;
 
     // Rollback method selection
     if ((h->find_index_mode & 0x06) == 0x02) {
         // Backward threshold search
         for (int i = max_num - 1; i >= 0; i--) {
-            if (h->min_th > (int32_t)val[i]) {
+            if (h->min_th > val[i]) {
                 out_index = i;
                 break;
             }
@@ -503,7 +540,7 @@ find_trigger_index_new(int32_t *array, struct hx711s_sensor *h)
     } else if ((h->find_index_mode & 0x06) == 0x04) {
         // Forward threshold search
         for (int i = 0; i < max_num; i++) {
-            if (h->min_th < (int32_t)val[i]) {
+            if (h->min_th < val[i]) {
                 out_index = i;
                 break;
             }
@@ -755,6 +792,7 @@ command_add_hx711s(uint32_t *args)
 }
 DECL_COMMAND(command_add_hx711s, "add_hx711s oid=%c index=%c clk_pin=%u sdo_pin=%u");
 
+#if 0 // deprecated - replaced by trsync based approach
 void
 command_query_hx711s(uint32_t *args)
 {
@@ -771,7 +809,9 @@ command_query_hx711s(uint32_t *args)
     irq_enable();
 }
 DECL_COMMAND(command_query_hx711s, "query_hx711s oid=%c times_read=%hu");
+#endif
 
+#if 0
 void
 command_sg_probe_check(uint32_t *args)
 {
@@ -799,7 +839,6 @@ command_sg_probe_check(uint32_t *args)
     h->is_trigger = 0;
     h->trigger_tick = 0;
     h->is_running_check = 0;
-    h->now_trigger = 0;
     h->trigger_index = 0;
     memset(h->sample_values, 0, sizeof(h->sample_values));
 
@@ -843,7 +882,7 @@ command_sg_probe_check(uint32_t *args)
           (uint32_t)args[2], (uint32_t)args[3]);
 }
 DECL_COMMAND(command_sg_probe_check, "sg_probe_check oid=%c x=%i y=%i z=%i cmd=%i");
-
+#endif
 /****************************************************************
  * trsync-based Homing Command
  ****************************************************************/
@@ -859,7 +898,6 @@ command_hx711s_home(uint32_t *args)
     h->is_homing = 0;
     h->is_trigger = 0;
     h->trigger_tick = 0;
-    h->now_trigger = 0;
     h->trigger_index = 0;
 
     // If trsync_oid is 0, homing is finished
@@ -973,13 +1011,10 @@ hx711s_task(void)
         }
 
         // Sampling phase
-        uint32_t now_tick = timer_read_time();
-
         if (!hx711s_read_sensor(h, sensor_idx))
-            continue;
+          continue;
 
-        h->time_stamp[sensor_idx] = timer_read_time();
-
+        uint32_t now_tick = timer_read_time();
         // Fusion filter
         if (!hx711s_fusion_filter(h, sensor_idx, h->enable_hpf))
             continue;
@@ -987,35 +1022,37 @@ hx711s_task(void)
         // Trigger detection
         int32_t trigger = trigger_check_new(h, sensor_idx);
 
-        // Always reflect real-time sensor state
-        if (trigger > 0) {
-            // Trigger detected - only fire trsync once per homing session
-            uint8_t was_triggered = h->is_trigger > 0;
+        uint8_t is_triggered = (trigger > 0);
+        uint8_t was_triggered = (h->is_trigger > 0);
 
+
+        if (!is_triggered) {
+          // Not homing and no trigger - clear state
+          // During homing, keep trigger latched so query_state returns correct
+          // value
+          if (!h->is_homing) {
+            h->is_trigger = 0;
+            h->trigger_tick = 0;
+          }
+        } else if (!was_triggered) {
+            // Trigger just detected - latch state
             h->is_trigger = trigger & 0xFF;
-            h->now_trigger = h->is_trigger;
             h->trigger_index = (trigger >> 8) & 0xFF;
 
             if (h->is_trigger & 0x10)
-                h->trigger_tick = timestamp_list[4][h->trigger_index];
+                h->trigger_tick = timestamp_list[4][h->trigger_index]; // fusion channel timestamp
             else
-                h->trigger_tick = timestamp_list[sensor_idx][h->trigger_index];
+                h->trigger_tick = timestamp_list[sensor_idx][h->trigger_index]; // individual sensor timestamp
 
-            // Fire trsync only on first trigger during homing
-            if (h->is_homing && h->ts != NULL && !was_triggered) {
+            // Fire trsync if necessary
+            if (h->is_homing && h->ts != NULL) {
                 trsync_do_trigger(h->ts, h->trigger_reason);
             }
-        } else if (!h->is_homing) {
-            // Not homing and no trigger - clear state
-            // During homing, keep trigger latched so query_state returns correct value
-            h->is_trigger = 0;
-            h->now_trigger = 0;
         }
 
         // Report heartbeat or trigger
-        if (loop % h->heartbeat_period == 0 ||
-            h->is_trigger > 0 ||
-            h->now_trigger > 0 ||
+        if ((loop % h->heartbeat_period) == 0 ||
+            was_triggered != is_triggered ||
             last_is_calibration != h->is_calibration) {
 
             if (hx711s_abs((int32_t)(loop - last_rep_loop)) > 80 ||
@@ -1027,13 +1064,13 @@ hx711s_task(void)
                       (uint8_t)h->is_calibration,
                       (uint8_t)h->trigger_index,
                       (uint32_t)h->trigger_tick,
-                      (uint32_t)h->now_trigger,
+                      (uint32_t)h->is_trigger,
                       (uint32_t)now_tick);
 
                 h->times_read--;
             }
 
-            last_is_trigger = h->now_trigger;
+            last_is_trigger = h->is_trigger;
             last_is_calibration = h->is_calibration;
         }
     }
