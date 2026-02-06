@@ -23,14 +23,6 @@
 static struct task_wake hx711s_wake;
 static uint32_t ori_rest_ticks;
 
-// Slope storage for position-based compensation (6x6 grid + 1 = 37 points)
-static int32_t all_point_k[37][4];
-static int32_t all_point_k_fix_index[37][4];
-static int32_t current_point_index;
-static int32_t current_point_index_count;
-static int32_t fix_out_index;
-static int32_t out_index;
-static int32_t kk;
 static int32_t k_slope;      // Median slope
 static int32_t bias_slope;   // Slope-to-rollback ratio
 
@@ -346,10 +338,7 @@ calibration_collect(struct hx711s_sensor *h, uint8_t sensor_idx)
     if (sensor_max[sensor_idx] == 0)
         sensor_max[sensor_idx] = h->sample_values[sensor_idx];
 
-    if (sample_count[sensor_idx] < 1000) {
-        samples[sensor_idx][sample_count[sensor_idx]] =
-            h->sample_values[sensor_idx];
-    }
+    samples[sensor_idx][sample_count[sensor_idx]] = h->sample_values[sensor_idx];
 
     if (h->sample_values[sensor_idx] < sensor_min[sensor_idx])
         sensor_min[sensor_idx] = h->sample_values[sensor_idx];
@@ -415,7 +404,6 @@ hx711s_fusion_filter(struct hx711s_sensor *h, uint8_t sensor_idx,
 static int32_t
 find_trigger_index_new(int32_t *array, struct hx711s_sensor *h)
 {
-    static int32_t last_point_count = 0;
     double val[HX711S_MAX_DATA_NUM] = {0};
     double val_transfer[HX711S_MAX_DATA_NUM] = {0};
     int max_num = h->max_data_num;
@@ -457,20 +445,20 @@ find_trigger_index_new(int32_t *array, struct hx711s_sensor *h)
     }
 
     // Find the index of the minimum value after rotation
+    int32_t out_index = 0;
     double min_val = val_transfer[0];
-    int32_t linear_out_index = 0;
     for (int i = max_num - 1; i >= 0; i--) {
         if (min_val > val_transfer[i]) {
             min_val = val_transfer[i];
-            linear_out_index = i;
+            out_index = i;
         }
     }
-    out_index = linear_out_index;
 
     // Linear regression + slope fallback
-    kk = (val[max_num - 1] - val[out_index]) / (max_num - out_index);
+    int32_t kk = (val[max_num - 1] - val[out_index]) / (max_num - out_index);
 
     // Calculate slope for compensation
+    int32_t fix_out_index = 0;
     if (h->find_index_mode & 0x08) {
         // Fixed pattern slope calculation
         fix_out_index = kk*k_slope / 10000 - bias_slope / 10;
@@ -556,14 +544,6 @@ find_trigger_index_new(int32_t *array, struct hx711s_sensor *h)
             out_index = max_num - 1;
     }
 
-    // Store slope data for position
-    if (current_point_index_count != last_point_count) {
-        all_point_k[current_point_index][current_point_index_count] = kk;
-        all_point_k_fix_index[current_point_index][current_point_index_count] =
-            fix_out_index;
-    }
-    last_point_count = current_point_index_count;
-
     return out_index;
 }
 
@@ -605,32 +585,37 @@ check_trigger(int32_t *data, struct hx711s_sensor *h)
           hx711s_abs(data[max_num - 2]) > hx711s_abs(data[max_num - 3])))
         return 0;
 
+
     // Check last 3 points are largest (in absolute terms)
-    // Since last 3 are monotonically increasing, check that the smallest
-    // of the last 3 is still larger than any earlier point
-    int32_t min_last3 = hx711s_abs(data[max_num - 3]);
     for (int i = 0; i < max_num - 3; i++) {
-        if (hx711s_abs(data[i]) >= min_last3)
+      if (hx711s_abs(data[max_num - 1]) > data[i] ||
+          hx711s_abs(data[max_num - 2]) > data[i] ||
+          hx711s_abs(data[max_num - 3]) > data[i])
             return 0;
     }
 
-    // Normalize and check slope angle (>40 degrees)
-    double val_min = 0x7FFFFFFF, val_max = -0x7FFFFFFF;
+    // Normalize data
+    double val_min = +0xFFFFFFFF, val_max = -0x00FFFFFF, val_avg = 0;
     for (int i = 0; i < max_num; i++) {
         if (data[i] < val_min) val_min = data[i];
         if (data[i] > val_max) val_max = data[i];
+        val_avg += data[i];
     }
-    double range = val_max - val_min;
-    if (range < 1.0) range = 1.0;
+    val_avg /= max_num;
+    double val_err = val_max - val_min;
+    if (val_err < 1e-15) val_err = 1e-15; // prevent division by zero
 
     double val_p[HX711S_MAX_DATA_NUM];
     for (int i = 0; i < max_num; i++)
-        val_p[i] = (data[i] - val_min) / range;
+        val_p[i] = (data[i] - val_min) / val_err;
 
+    // Ensure that the slope of all points relative to the last point is
+    // greater than 40 degrees, which can prevent false triggers caused by
+    // being too sensitive.
     for (int i = 0; i < max_num - 1; i++) {
         double k = (val_p[0] - val_p[i]) /
                    ((max_num - i) * 1.0 / max_num);
-        if (hx711s_abs((int32_t)(k * 1000)) < 800)
+        if (hx711s_abs(k) < 0.8)
             return 0;
         if (h->enable_shake_filter && k > 0.8)
             return 0;
@@ -900,6 +885,13 @@ command_hx711s_home(uint32_t *args)
     h->trigger_tick = 0;
     h->trigger_index = 0;
 
+    memset(h->sample_values, 0, sizeof(h->sample_values));
+
+    // Clear buffers
+    memset(data_list, 0, sizeof(data_list));
+    memset(filter_data_list, 0, sizeof(filter_data_list));
+    memset(timestamp_list, 0, sizeof(timestamp_list));
+
     // If trsync_oid is 0, homing is finished
     if (args[1] == 0) {
         return;
@@ -949,6 +941,7 @@ command_calibration_sample(uint32_t *args)
     memset(h->calibration_values, 0, sizeof(h->calibration_values));
     memset(h->sample_values, 0, sizeof(h->sample_values));
     memset(data_list, 0, sizeof(data_list));
+    memset(filter_data_list, 0, sizeof(filter_data_list));
     memset(timestamp_list, 0, sizeof(timestamp_list));
 
     h->is_trigger = 0;

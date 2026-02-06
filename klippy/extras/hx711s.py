@@ -108,11 +108,12 @@ class HX711SEndstopWrapper:
 
 class HX711SProbeSession:
     """Probe session using homing infrastructure for continuous motion."""
-    def __init__(self, config, hx711s, param_helper, z_min):
+    def __init__(self, config, hx711s, param_helper, offset_helper):
         self._hx711s = hx711s
         self._printer = hx711s.printer
         self._param_helper = param_helper
-        self._z_min = z_min
+        self._offset_helper = offset_helper
+        self._z_min = probe.lookup_minimum_z(config)
         self._results = []
         # Endstop wrapper now takes config for stepper registration
         self._endstop_wrapper = HX711SEndstopWrapper(config, hx711s)
@@ -123,10 +124,15 @@ class HX711SProbeSession:
     def end_probe_session(self):
         self._results = []
 
-    def _single_probe(self, phoming, speed):
+    def run_probe(self, gcmd):
         """Single probe using phoming.probing_move() for continuous motion."""
         toolhead = self._printer.lookup_object('toolhead')
+        phoming = self._printer.lookup_object('homing')
+        speed = self._param_helper.get_probe_params(gcmd)['probe_speed']
         curpos = toolhead.get_position()
+
+        if not self._hx711s.calibration_start(30, 5.0):
+            raise self._printer.command_error("HX711S: Calibration failed")
 
         # Reset trigger state
         self._hx711s.is_trigger = 0
@@ -139,63 +145,7 @@ class HX711SProbeSession:
         epos = phoming.probing_move(self._endstop_wrapper, pos, speed)
 
         logging.info("HX711S: Probe at z=%.6f", epos[2])
-        return epos[2]
-
-    def run_probe(self, gcmd):
-        """Double-tap probe using phoming.probing_move() for continuous motion."""
-        toolhead = self._printer.lookup_object('toolhead')
-        phoming = self._printer.lookup_object('homing')
-        params = self._param_helper.get_probe_params(gcmd)
-        speed = params['probe_speed']
-
-        # Elegoo's _probe_times pattern: retry if z1 and z2 differ too much
-        MAX_Z_ERR = 0.1  # mm - tolerance between double-tap probes
-        MAX_RETRIES = 3
-
-        for attempt in range(MAX_RETRIES):
-            # First probe
-            toolhead.wait_moves()
-            if not self._hx711s.calibration_start(30, 5.0):
-                raise self._printer.command_error("HX711S: Calibration failed")
-
-            z1 = self._single_probe(phoming, speed)
-
-            # Lift and second probe
-            curpos = toolhead.get_position()
-            toolhead.manual_move([None, None, curpos[2] + PROBE_LIFT_HEIGHT],
-                                PROBE_LIFT_SPEED)
-            toolhead.wait_moves()
-
-            # Small delay for sensor to stabilize after lift
-            # The trigger detection algorithm needs fresh "not touching" samples
-            self._hx711s.reactor.pause(self._hx711s.reactor.monotonic() + 0.5)
-
-            z2 = self._single_probe(phoming, speed)
-
-            # Check tolerance
-            z_diff = abs(z1 - z2)
-            if z_diff <= MAX_Z_ERR:
-                # Good result
-                z_avg = (z1 + z2) / 2.0
-                logging.info("HX711S: Probe z1=%.4f z2=%.4f diff=%.4f avg=%.4f",
-                            z1, z2, z_diff, z_avg)
-                break
-            else:
-                # Results differ too much, retry
-                logging.warning("HX711S: Probe retry %d - z1=%.4f z2=%.4f diff=%.4f > %.4f",
-                               attempt + 1, z1, z2, z_diff, MAX_Z_ERR)
-                # Lift before retry
-                curpos = toolhead.get_position()
-                toolhead.manual_move([None, None, curpos[2] + PROBE_LIFT_HEIGHT],
-                                    PROBE_LIFT_SPEED)
-        else:
-            # Max retries exceeded, use last result anyway
-            z_avg = (z1 + z2) / 2.0
-            logging.warning("HX711S: Max retries exceeded, using avg=%.4f", z_avg)
-
-        final_pos = toolhead.get_position()
-        final_pos[2] = z_avg
-        self._results.append(final_pos)
+        self._results.append(epos)
 
     def pull_probed_results(self):
         res = self._results
@@ -282,8 +232,9 @@ class HX711S:
             config, self, self._query_endstop)
 
         # Custom probe session for incremental probing
-        self._probe_session = HX711SProbeSession(
-            config, self, self._param_helper, self._z_min)
+        tap_session = HX711SProbeSession(config, self, self._param_helper, self._probe_offsets)
+        self._probe_session = probe.ProbeSessionHelper(
+            config, self._param_helper, tap_session.start_probe_session)
 
         # Register as the probe object
         self.printer.add_object('probe', self)
@@ -294,9 +245,6 @@ class HX711S:
                                desc="Calibrate HX711S strain gauge sensors")
         gcode.register_command('HX_MULTI_STATUS', self.cmd_HX711S_STATUS,
                                desc="Report HX711S sensor status")
-        gcode.register_command('HX_MULTI_TEST', self.cmd_HX711S_TEST,
-                               desc="Test HX711S trigger detection")
-
         logging.info("HX711S: Initialized with %d sensors", self.sensor_count)
 
     def _query_endstop(self, print_time):
