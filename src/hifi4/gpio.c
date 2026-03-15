@@ -62,6 +62,16 @@ struct gpio_pwm gpio_pwm_setup(uint8_t pin, uint32_t cycle_time, uint8_t val) {
 void gpio_pwm_write(struct gpio_pwm g, uint8_t val) {
 }
 
+// Average 240 ADC samples (~20ms) to reject 50 Hz mains interference.
+// 24 kHz hw rate / 2 channels = 12 kHz per channel = 240 samples per 20ms.
+#define ADC_AVG_COUNT 240
+#define ADC_POLL_US   70
+
+static struct {
+    uint32_t sum;
+    uint16_t count;
+} adc_accum[GPADC_MAX_CHANNELS];
+
 struct gpio_adc gpio_adc_setup(uint8_t pin) {
     // Valid ADC pins PB13-PB15
     if (pin < (32+13) || pin > (32+13+3))
@@ -76,21 +86,31 @@ struct gpio_adc gpio_adc_setup(uint8_t pin) {
 }
 void adc_init(void)
 {
-    gpadc_init(1000);
+    gpadc_init(24000);
 }
 DECL_INIT(adc_init);
 uint32_t gpio_adc_sample(struct gpio_adc g) {
-    if (gpadc_has_data(g.chan))
+    if (gpadc_has_data(g.chan)) {
+        adc_accum[g.chan].sum += gpadc_read_data(g.chan);
+        gpadc_clear_status(g.chan);
+        adc_accum[g.chan].count++;
+    }
+    if (adc_accum[g.chan].count >= ADC_AVG_COUNT)
         return 0;
-    return timer_from_us(20);
+    return timer_from_us(ADC_POLL_US);
 }
 uint16_t gpio_adc_read(struct gpio_adc g) {
-    uint16_t data = gpadc_read_data(g.chan);
-    gpadc_clear_status(g.chan);
-    return data;
+    uint16_t val = adc_accum[g.chan].count
+        ? (uint16_t)(adc_accum[g.chan].sum / adc_accum[g.chan].count)
+        : gpadc_read_data(g.chan);
+    adc_accum[g.chan].sum = 0;
+    adc_accum[g.chan].count = 0;
+    return val;
 }
 void gpio_adc_cancel_sample(struct gpio_adc g) {
-    // gpadc_channel_disable(g.chan);
+    adc_accum[g.chan].sum = 0;
+    adc_accum[g.chan].count = 0;
+    gpadc_clear_status(g.chan);
 }
 
 struct spi_config

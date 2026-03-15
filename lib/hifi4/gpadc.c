@@ -62,24 +62,17 @@ void gpadc_init(uint32_t sample_rate)
      * For simplicity, we'll use reasonable defaults:
      * fs_div = 4, tacq = 63 gives approximately 75 kHz base rate
      */
-    uint32_t hosc_freq = CLK_FREQ_HOSC; /* 24 MHz */
     uint32_t fs_div = 4;
     uint32_t tacq = 63;
     
     /* Adjust fs_div based on desired sample rate */
     if (sample_rate > 0) {
-        /* Calculate: sample_rate = hosc_freq / ((fs_div + 1) * (tacq + 1))
-         * fs_div = (hosc_freq / (sample_rate * (tacq + 1))) - 1 */
-        uint32_t divisor = hosc_freq / (sample_rate * (tacq + 1));
-        if (divisor > 0) {
-            fs_div = divisor - 1;
-        }
-        if (fs_div > 0xFFFF) {
+        fs_div = CLK_FREQ_HOSC / sample_rate - 1;
+        if (fs_div > 0xFFFF)
             fs_div = 0xFFFF;
-        }
     }
     
-    sr_con = (fs_div & 0xFFFF) | ((tacq & 0xFFFF) << 16);
+    sr_con = (tacq & 0xFFFF) | ((fs_div & 0xFFFF) << 16);
     gpadc_write_reg(GPADC_SR_CON, sr_con);
     
     /* Configure control register:
