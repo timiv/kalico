@@ -285,6 +285,13 @@ calibration_collect(struct hx711s_sensor *h, uint8_t sensor_idx)
             sensor_min[j] = 0;
             sensor_max[j] = 0;
         }
+        output("hx711s cal_done: cal=%c iv0=%i iv1=%i iv2=%i iv3=%i"
+               " amp0=%i amp1=%i amp2=%i amp3=%i",
+               h->is_calibration,
+               h->init_values[0], h->init_values[1],
+               h->init_values[2], h->init_values[3],
+               h->amplitude_values[0], h->amplitude_values[1],
+               h->amplitude_values[2], h->amplitude_values[3]);
         return 1;
     }
 
@@ -632,8 +639,12 @@ hx711s_timer_event(struct timer *t)
     struct hx711s_sensor *h = container_of(t, struct hx711s_sensor, timer);
     uint32_t rest_ticks = h->rest_ticks;
 
-    if (!(h->flags & HX711S_FLAG_START))
+    if (!(h->flags & HX711S_FLAG_START)) {
+        if (h->is_homing)
+            output("hx711s BUG: timer SF_DONE while is_homing=1 flags=0x%02x",
+                   (unsigned)h->flags);
         return SF_DONE;
+    }
 
     if (h->flags & HX711S_FLAG_PENDING) {
         // Previous sample not yet consumed — back off
@@ -679,8 +690,6 @@ command_config_hx711s(uint32_t *args)
     if (h->sg_mode == SG_MODE_HX717_HALF_BRIDGE) {
         h->sample_period = 1500;
         h->max_data_num = 16;
-        h->find_index_mode = 0;
-        h->min_th = 0;
     } else {
         h->sample_period = args[3] & 0xFFFFFF;
         h->max_data_num = 12;
@@ -755,10 +764,13 @@ command_hx711s_home(uint32_t *args)
     h->is_trigger = 0;
     h->trigger_tick = 0;
     h->trigger_index = 0;
-    h->flags = 0;
 
-    // If trsync_oid is 0, homing is finished
+    // If trsync_oid is 0, homing is finished, clear AWAIT_HOMING
+    // but keep FLAG_START so the timer keeps running.
     if (args[1] == 0) {
+        irq_disable();
+        h->flags &= ~HX711S_FLAG_AWAIT_HOMING;
+        irq_enable();
         return;
     }
 
@@ -768,7 +780,17 @@ command_hx711s_home(uint32_t *args)
     h->trigger_reason = args[3];
     h->error_reason = args[4];
     h->is_homing = 1;
+    // Atomically set AWAIT_HOMING while preserving FLAG_START
+    irq_disable();
     h->flags = HX711S_FLAG_START | HX711S_FLAG_AWAIT_HOMING;
+    irq_enable();
+
+    output("hx711s home_start: hclk=%u now=%u cnt4=%i out4=%i"
+           " fim=%u minth=%i maxth=%i sgm=%u",
+           h->homing_clock, timer_read_time(),
+           sw_data_count[4], sw_last_out[4],
+           (unsigned)h->find_index_mode, h->min_th, h->max_th,
+           (unsigned)h->sg_mode);
 }
 DECL_COMMAND(command_hx711s_home,
     "hx711s_home oid=%c trsync_oid=%c clock=%u trigger_reason=%c error_reason=%c");
@@ -876,6 +898,22 @@ hx711s_task(void)
             if (timer_is_before(now_tick, h->homing_clock))
                 continue;
             h->flags &= ~HX711S_FLAG_AWAIT_HOMING;
+            output("hx711s await_exit: cnt0=%i cnt1=%i cnt2=%i cnt3=%i"
+                   " cnt4=%i out4=%i now=%u hclk=%u",
+                   sw_data_count[0], sw_data_count[1],
+                   sw_data_count[2], sw_data_count[3],
+                   sw_data_count[4], sw_last_out[4],
+                   now_tick, h->homing_clock);
+            output("hx711s fw0: %i %i %i %i %i %i %i %i",
+                   data_list[4][0], data_list[4][1],
+                   data_list[4][2], data_list[4][3],
+                   data_list[4][4], data_list[4][5],
+                   data_list[4][6], data_list[4][7]);
+            output("hx711s fw1: %i %i %i %i %i %i %i %i",
+                   data_list[4][8], data_list[4][9],
+                   data_list[4][10], data_list[4][11],
+                   data_list[4][12], data_list[4][13],
+                   data_list[4][14], data_list[4][15]);
         }
 
         // Fusion filter
@@ -902,15 +940,30 @@ hx711s_task(void)
             h->is_trigger = trigger & 0xFF;
             h->trigger_index = (trigger >> 8) & 0xFF;
 
-            if (h->is_trigger & 0x10)
-                h->trigger_tick = timestamp_list[4][h->trigger_index]; // fusion channel timestamp
-            else
-                h->trigger_tick = timestamp_list[sensor_idx][h->trigger_index]; // individual sensor timestamp
+            // Determine which channel triggered
+            int trig_ch = (h->is_trigger & 0x10) ? 4 : sensor_idx;
+            int trig_idx = h->trigger_index;
+
+            // Use the raw timestamp at the trigger index (no interpolation)
+            h->trigger_tick = timestamp_list[trig_ch][trig_idx];
 
             // Fire trsync if necessary
             if (h->is_homing && h->ts != NULL) {
                 trsync_do_trigger(h->ts, h->trigger_reason);
             }
+            output("hx711s trig: val=%i idx=%c tick=%u is=%c homing=%c",
+                   trigger, h->trigger_index, h->trigger_tick,
+                   h->is_trigger, h->is_homing);
+            output("hx711s tw0: %i %i %i %i %i %i %i %i",
+                   data_list[4][0], data_list[4][1],
+                   data_list[4][2], data_list[4][3],
+                   data_list[4][4], data_list[4][5],
+                   data_list[4][6], data_list[4][7]);
+            output("hx711s tw1: %i %i %i %i %i %i %i %i",
+                   data_list[4][8], data_list[4][9],
+                   data_list[4][10], data_list[4][11],
+                   data_list[4][12], data_list[4][13],
+                   data_list[4][14], data_list[4][15]);
         }
 
         // Report heartbeat or trigger

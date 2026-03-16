@@ -101,17 +101,33 @@ class HX711SEndstopWrapper:
     def query_endstop(self, print_time):
         return self._hx711s.is_triggered()
 
-    def probing_move(self, pos, speed, gcmd):
-        """Calibrate sensors then execute a trsync-based probing move."""
-        toolhead = self._printer.lookup_object('toolhead')
-        # Wait for pending moves (retract) to complete before calibrating
-        # so the sensor baseline isn't contaminated by bed contact
+    def _settle_and_calibrate(self, toolhead, reactor, label=""):
+        """Wait for moves, settle vibrations, and calibrate sensors."""
         toolhead.wait_moves()
+        logging.info("HX711S %s: wait_moves done t=%.4f print_time=%.4f",
+                     label, reactor.monotonic(),
+                     toolhead.get_last_move_time())
+        settle_time = self._hx711s.settle_time
+        if settle_time > 0.:
+            reactor.pause(reactor.monotonic() + settle_time)
+            logging.info("HX711S %s: settle done t=%.4f settle_time=%.3f",
+                         label, reactor.monotonic(), settle_time)
+        # Advance print_time to provide scheduling headroom for homing_clock
         toolhead.dwell(0.100)
         if not self._hx711s.calibration_start(30, 5.0):
             raise self._printer.command_error(
-                "HX711S: Calibration failed before probe")
+                "HX711S: Calibration failed before probe (%s)" % label)
+        logging.info("HX711S %s: calibration done t=%.4f print_time=%.4f",
+                     label, reactor.monotonic(),
+                     toolhead.get_last_move_time())
+
+    def probing_move(self, pos, speed, gcmd):
+        """Settle vibrations, calibrate sensors, then execute a
+        trsync-based probing move."""
+        toolhead = self._printer.lookup_object('toolhead')
+        reactor = self._hx711s.reactor
         phoming = self._printer.lookup_object('homing')
+        self._settle_and_calibrate(toolhead, reactor, "probe")
         return phoming.probing_move(self, pos, speed)
 
     def multi_probe_begin(self):
@@ -122,9 +138,20 @@ class HX711SEndstopWrapper:
 
     def probe_prepare(self, hmove):
         toolhead = self._printer.lookup_object('toolhead')
+        reactor = self._hx711s.reactor
+        # Wait for retract move to physically complete
         toolhead.wait_moves()
+        logging.info("HX711S probe_prepare: wait_moves done t=%.4f"
+                     " print_time=%.4f",
+                     reactor.monotonic(), toolhead.get_last_move_time())
+        # Advance print_time to provide scheduling headroom for homing_clock.
+        # This determines the AWAIT_HOMING duration on the MCU side.
+        # NOTE: this does NOT provide real settling time — it only advances
+        # the internal print_time by 0.100s (takes ~1.5ms wall clock).
         toolhead.dwell(0.100)
-        pass
+        logging.info("HX711S probe_prepare: dwell done t=%.4f"
+                     " print_time=%.4f",
+                     reactor.monotonic(), toolhead.get_last_move_time())
 
     def probe_finish(self, hmove):
         pass
@@ -163,7 +190,9 @@ class HX711S:
         self.k_slope = config.getint('k_slope', 1000,
                                      minval=-10000, maxval=10000)
         self.bias_slope = config.getint('bias_slope', 120,
-                                        minval=-10000, maxval=10000)
+                                         minval=-10000, maxval=10000)
+        self.settle_time = config.getfloat('settle_time', 0.,
+                                               minval=0., maxval=2.0)
 
         # Lookup and validate sensor pins
         ppins = self.printer.lookup_object('pins')
