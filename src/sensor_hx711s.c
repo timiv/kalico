@@ -212,9 +212,16 @@ hx711s_delay_ns(uint32_t ns)
 
 // Read single sensor via bit-banging.
 // Called from the background task after the timer ISR confirmed DOUT is low.
-static void
+// Returns 1 on success, 0 if DOUT was HIGH (sensor not ready / conversion
+// boundary race).  On failure the previous sample_values entry is kept.
+static uint8_t
 hx711s_read_sensor(struct hx711s_sensor *h, uint8_t sensor_idx)
 {
+    // Re-check DOUT: the sensor may have started a new conversion since the
+    // timer ISR checked, especially when polling at ~conversion-period rate.
+    if (gpio_in_read(h->sdos[sensor_idx]))
+        return 0;
+
     // Capture the timestamp as early as possible to minimize timing errors.
     uint32_t capture_time = timer_read_time();
 
@@ -246,6 +253,7 @@ hx711s_read_sensor(struct hx711s_sensor *h, uint8_t sensor_idx)
 
     h->sample_values[sensor_idx] = value;
     h->time_stamp[sensor_idx] = capture_time;
+    return 1;
 }
 
 /****************************************************************
@@ -295,8 +303,9 @@ calibration_collect(struct hx711s_sensor *h, uint8_t sensor_idx)
         return 1;
     }
 
-    // Read sensor (timer ISR already confirmed DOUT is low)
-    hx711s_read_sensor(h, sensor_idx);
+    // Read sensor (skip if DOUT went HIGH since ISR check)
+    if (!hx711s_read_sensor(h, sensor_idx))
+        return 0;
 
     // Store sample
     if ((sensor_idx + 1) == h->hx711_count)
@@ -641,7 +650,7 @@ hx711s_timer_event(struct timer *t)
 
     if (!(h->flags & HX711S_FLAG_START)) {
         if (h->is_homing)
-            output("hx711s BUG: timer SF_DONE while is_homing=1 flags=0x%02x",
+            output("hx711s BUG: timer SF_DONE while is_homing=1 flags=%u",
                    (unsigned)h->flags);
         return SF_DONE;
     }
@@ -691,7 +700,11 @@ command_config_hx711s(uint32_t *args)
         h->sample_period = 1500;
         h->max_data_num = 16;
     } else {
-        h->sample_period = args[3] & 0xFFFFFF;
+        // Use fast polling (1500µs) to ensure all 4 sensors are read within
+        // one HX711 conversion period (12.5ms at 80 SPS).  At 3125µs the
+        // worst-case 4×3125=12.5ms exactly equals the conversion period,
+        // causing sensor-3 starvation and zero-read spikes.
+        h->sample_period = 1500;
         h->max_data_num = 12;
     }
 
@@ -890,8 +903,9 @@ hx711s_task(void)
 
         uint32_t now_tick = timer_read_time();
 
-        // Read the ADC (timer ISR already confirmed DOUT is low)
-        hx711s_read_sensor(h, sensor_idx);
+        // Read the ADC (skip if DOUT went HIGH since ISR check)
+        if (!hx711s_read_sensor(h, sensor_idx))
+            continue;
 
         // Wait for homing_clock before enabling trigger detection
         if (h->flags & HX711S_FLAG_AWAIT_HOMING) {
