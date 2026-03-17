@@ -16,16 +16,31 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#define MAX_FUSION_SENSORS 4
+
 struct hx71x_adc {
     struct timer timer;
     uint8_t gain_channel;   // the gain+channel selection (1-4)
     uint8_t flags;
     uint32_t rest_ticks;
     uint32_t last_error;
+    int32_t last_sample;
     struct gpio_in dout; // pin used to receive data from the hx71x
     struct gpio_out sclk; // pin used to generate clock for the hx71x
     struct sensor_bulk sb;
     struct load_cell_probe *lce;
+};
+
+struct hx71x_fusion_slot {
+    struct hx71x_adc *sensor;
+    int8_t direction;
+};
+
+struct hx71x_fusion_group {
+    struct sensor_bulk sb;
+    struct load_cell_probe *lce;
+    uint8_t sensor_count;
+    struct hx71x_fusion_slot slots[MAX_FUSION_SENSORS];
 };
 
 enum {
@@ -129,23 +144,24 @@ hx71x_event(struct timer *timer)
 }
 
 static void
-add_sample(struct hx71x_adc *hx71x, uint8_t oid, uint32_t counts,
-                uint8_t force_flush) {
+add_sample(struct sensor_bulk *sb, uint8_t oid, uint32_t counts,
+                uint8_t force_flush)
+{
     // Add measurement to buffer
-    hx71x->sb.data[hx71x->sb.data_count] = counts;
-    hx71x->sb.data[hx71x->sb.data_count + 1] = counts >> 8;
-    hx71x->sb.data[hx71x->sb.data_count + 2] = counts >> 16;
-    hx71x->sb.data[hx71x->sb.data_count + 3] = counts >> 24;
-    hx71x->sb.data_count += BYTES_PER_SAMPLE;
+    sb->data[sb->data_count] = counts;
+    sb->data[sb->data_count + 1] = counts >> 8;
+    sb->data[sb->data_count + 2] = counts >> 16;
+    sb->data[sb->data_count + 3] = counts >> 24;
+    sb->data_count += BYTES_PER_SAMPLE;
 
-    if (hx71x->sb.data_count + BYTES_PER_SAMPLE > ARRAY_SIZE(hx71x->sb.data)
+    if (sb->data_count + BYTES_PER_SAMPLE > ARRAY_SIZE(sb->data)
         || force_flush)
-        sensor_bulk_report(&hx71x->sb, oid);
+        sensor_bulk_report(sb, oid);
 }
 
 // hx71x ADC query
 static void
-hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
+hx71x_read_adc(struct hx71x_adc *hx71x)
 {
     // Read from sensor
     uint_fast8_t gain_channel = hx71x->gain_channel;
@@ -177,13 +193,38 @@ hx71x_read_adc(struct hx71x_adc *hx71x, uint8_t oid)
         counts = hx71x->last_error;
     }
 
-    // probe is optional, report if enabled
-    if (hx71x->last_error == 0 && hx71x->lce) {
-        load_cell_probe_report_sample(hx71x->lce, counts);
-    }
+    hx71x->last_sample = (int32_t)counts;
+}
 
-    // Add measurement to buffer
-    add_sample(hx71x, oid, counts, false);
+static void
+hx71x_process_sensor(struct hx71x_adc *hx71x, uint8_t oid)
+{
+    if (!hx71x->flags)
+        return;
+    hx71x_read_adc(hx71x);
+    add_sample(&hx71x->sb, oid, hx71x->last_sample, false);
+    if (hx71x->last_error == 0 && hx71x->lce)
+        load_cell_probe_report_sample(hx71x->lce, hx71x->last_sample);
+}
+
+static void
+hx71x_query_sensor(struct hx71x_adc *hx71x, uint32_t rest_ticks)
+{
+    sched_del_timer(&hx71x->timer);
+    hx71x->flags = 0;
+    hx71x->last_error = 0;
+    hx71x->last_sample = 0;
+    hx71x->rest_ticks = rest_ticks;
+    if (!rest_ticks) {
+        gpio_out_write(hx71x->sclk, 1); // put chip in power down state
+        return;
+    }
+    gpio_out_write(hx71x->sclk, 0); // wake chip from power down
+    sensor_bulk_reset(&hx71x->sb);
+    irq_disable();
+    hx71x->timer.waketime = timer_read_time() + rest_ticks;
+    sched_add_timer(&hx71x->timer);
+    irq_enable();
 }
 
 // Create a hx71x sensor
@@ -220,22 +261,7 @@ command_query_hx71x(uint32_t *args)
 {
     uint8_t oid = args[0];
     struct hx71x_adc *hx71x = oid_lookup(oid, command_config_hx71x);
-    sched_del_timer(&hx71x->timer);
-    hx71x->flags = 0;
-    hx71x->last_error = 0;
-    hx71x->rest_ticks = args[1];
-    if (!hx71x->rest_ticks) {
-        // End measurements
-        gpio_out_write(hx71x->sclk, 1); // put chip in power down state
-        return;
-    }
-    // Start new measurements
-    gpio_out_write(hx71x->sclk, 0); // wake chip from power down
-    sensor_bulk_reset(&hx71x->sb);
-    irq_disable();
-    hx71x->timer.waketime = timer_read_time() + hx71x->rest_ticks;
-    sched_add_timer(&hx71x->timer);
-    irq_enable();
+    hx71x_query_sensor(hx71x, args[1]);
 }
 DECL_COMMAND(command_query_hx71x, "query_hx71x oid=%c rest_ticks=%u");
 
@@ -253,17 +279,126 @@ command_query_hx71x_status(const uint32_t *args)
 }
 DECL_COMMAND(command_query_hx71x_status, "query_hx71x_status oid=%c");
 
+/****************************************************************
+ * Fusion Group Support
+ ****************************************************************/
+
+void
+command_config_hx71x_fusion(uint32_t *args)
+{
+    oid_alloc(args[0], command_config_hx71x_fusion, sizeof(struct hx71x_fusion_group));
+}
+DECL_COMMAND(command_config_hx71x_fusion, "config_hx71x_fusion oid=%c");
+
+void
+command_hx71x_fusion_add(uint32_t *args)
+{
+    struct hx71x_fusion_group *g = oid_lookup(args[0],
+                                               command_config_hx71x_fusion);
+    struct hx71x_adc *hx71x = oid_lookup(args[1], command_config_hx71x);
+    uint8_t idx = g->sensor_count;
+    if (idx >= MAX_FUSION_SENSORS)
+        shutdown("hx71x_fusion: too many sensors");
+    g->slots[idx].sensor = hx71x;
+    g->slots[idx].direction = args[2] ? -1 : 1;
+    g->sensor_count++;
+}
+DECL_COMMAND(command_hx71x_fusion_add,
+             "hx71x_fusion_add oid=%c hx71x_oid=%c invert=%c");
+
+void
+hx71x_fusion_attach_load_cell_probe(uint32_t *args)
+{
+    struct hx71x_fusion_group *g = oid_lookup(args[0],
+                                               command_config_hx71x_fusion);
+    g->lce = load_cell_probe_oid_lookup(args[1]);
+}
+DECL_COMMAND(hx71x_fusion_attach_load_cell_probe,
+             "hx71x_fusion_attach_load_cell_probe oid=%c"
+             " load_cell_probe_oid=%c");
+
+void
+command_query_hx71x_fusion(uint32_t *args)
+{
+    struct hx71x_fusion_group *g = oid_lookup(args[0],
+                                               command_config_hx71x_fusion);
+    if (!g->sensor_count)
+        shutdown("hx71x_fusion: no sensors");
+    sensor_bulk_reset(&g->sb);
+    uint8_t i;
+    for (i = 0; i < g->sensor_count; i++)
+        hx71x_query_sensor(g->slots[i].sensor, args[1]);
+}
+DECL_COMMAND(command_query_hx71x_fusion,
+             "query_hx71x_fusion oid=%c rest_ticks=%u");
+
+void
+command_query_hx71x_fusion_status(const uint32_t *args)
+{
+    uint8_t oid = args[0];
+    struct hx71x_fusion_group *g = oid_lookup(oid,
+                                               command_config_hx71x_fusion);
+    irq_disable();
+    const uint32_t start_t = timer_read_time();
+    uint8_t any_pending = 0;
+    uint8_t i;
+    for (i = 0; i < g->sensor_count; i++) {
+        if (hx71x_is_data_ready(g->slots[i].sensor)) {
+            any_pending = 1;
+            break;
+        }
+    }
+    irq_enable();
+    uint8_t pending_bytes = any_pending ? BYTES_PER_SAMPLE : 0;
+    sensor_bulk_status(&g->sb, oid, start_t, 0, pending_bytes);
+}
+DECL_COMMAND(command_query_hx71x_fusion_status,
+             "query_hx71x_fusion_status oid=%c");
+
+// Read pending sensors in a fusion group and report fused average
+static void
+hx71x_process_fusion_group(struct hx71x_fusion_group *g, uint8_t oid)
+{
+    uint8_t i, any_read = 0;
+    for (i = 0; i < g->sensor_count; i++) {
+        struct hx71x_fusion_slot *slot = &g->slots[i];
+        if (slot->sensor->flags) {
+            hx71x_read_adc(slot->sensor);
+            any_read = 1;
+        }
+    }
+    if (!any_read)
+        return;
+    int32_t sum = 0;
+    for (i = 0; i < g->sensor_count; i++) {
+        struct hx71x_fusion_slot *slot = &g->slots[i];
+        if (slot->sensor->last_error) {
+            add_sample(&g->sb, oid, slot->sensor->last_error, false);
+            return;
+        }
+        sum += slot->direction * slot->sensor->last_sample;
+    }
+    int32_t fused = sum / g->sensor_count;
+    add_sample(&g->sb, oid, (uint32_t)fused, false);
+    if (g->lce)
+        load_cell_probe_report_sample(g->lce, fused);
+}
+
 // Background task that performs measurements
 void
 hx71x_capture_task(void)
 {
     if (!sched_check_wake(&wake_hx71x))
         return;
+    // Process fusion groups (clears flags on grouped sensors)
+    uint8_t goid;
+    struct hx71x_fusion_group *g;
+    foreach_oid(goid, g, command_config_hx71x_fusion)
+        hx71x_process_fusion_group(g, goid);
+    // Process standalone sensors (grouped ones already have flags=0)
     uint8_t oid;
     struct hx71x_adc *hx71x;
-    foreach_oid(oid, hx71x, command_config_hx71x) {
-        if (hx71x->flags)
-            hx71x_read_adc(hx71x, oid);
-    }
+    foreach_oid(oid, hx71x, command_config_hx71x)
+        hx71x_process_sensor(hx71x, oid);
 }
 DECL_TASK(hx71x_capture_task);
